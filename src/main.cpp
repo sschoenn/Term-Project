@@ -26,14 +26,18 @@
 #include "taskshare.h"
 #include <analogWrite.h>
 #include <cmath>
-#include "TimeLib.h"
+#include "TimeLib.h" //this isn't working
+#include <chrono>
+#include <ctime>
 
 
 /// Define Shares & Queues Below
 Share<float> elevation ("ELEV");             // current elevation in milidegrees
 Share<float> azimuth ("AZI");                // current azimuth in milidegrees
-Share<bool> clear_elevation ("CLEAR");       // make this true to set current elevation to 0deg
-Share<bool> elev_direction("DIR");           // either a 1 or 0 to represent direction
+Share<bool> clear_elevation ("CLEAR ELEV");  // make this true to set current elevation to 0deg
+Share<bool> clear_azimuth ("CLEAR AZI");     // make this true to set current elevation to 0deg
+Share<bool> elev_direction("ELEV DIR");      // either a 1 or 0 to represent direction of the elev motor
+Share<bool> azi_direction("AZI DIR");        // either a 1 or 0 to represent direction of the elev motor
 Share<float> elevation_sp("SP ELEV");        // elevation setpoint in milidegrees
 Share<float> azimuth_sp("SP AZI");           // azimuth setpoint in milidegrees
 Share<bool> start_condition("start");        // true if we're ready to begin the tracking sequence
@@ -41,12 +45,7 @@ Share<bool> home_condition("homing");        // true if the device is homing its
 Share<bool> first_position("1st POSITION");  // true if we're trying to move to the first position of the sequence (part of the home state)
 Queue<double> accelmag_queue (30);           // accel/mag queue of latest data
 // Ephemeris Shares, contain the time data used to track satellite
-Share<uint8_t> desired_day("DAY NUM");       // contains the day of the month (0-31) 
-Share<uint8_t> desired_month("MONTH NUM");   // contains the month (1-12) 
-Share<uint8_t> desired_year("YEAR NUM");     // contains the 4-digit year (2020, 2008, etc) 
-Share<uint8_t> desired_hour("HOUR NUM");     // contains hour (0-23) 
-Share<uint8_t> desired_minute("MINUTE NUM"); // contains minutes (0-59) 
-Share<uint8_t> desired_second("SECOND NUM"); // contains seconds (0-59) 
+Queue<uint8_t> starttime_queue (6);          // contains starting date details: year/month/day/hour/minute/second
 
 
 /** @brief   Task which talks to the FXOS8700 accelerometer/magnetometer, and  
@@ -249,7 +248,7 @@ void task_supervisor (void* p_params) //this task is actually the master task
 
     /// Initialize Variables
     uint8_t state = 0;                //contains current state of supervisor task, begin in HOME state
-    //these variables hold ephemeris tracking data pulled from shares
+    //these variables hold start time data from the starttime_queue
     uint8_t day;
     uint8_t month;
     uint8_t year;
@@ -317,7 +316,7 @@ void task_supervisor (void* p_params) //this task is actually the master task
             //elevation_sp << (sp_lut[increment]);      //old code, idk what this does
             if(home_bool == false){                      // Check if the home task is still homing the tracker
                 if(first_position_var == true){         // Azimuth encoders are homed to north, but we still need to check if we're in the starting position
-                    //move to the initial track position
+                    //move to the initial track position, which should be contained in azimuth_sp and elevation_sp
                     //turn on motor control and feed it the very first elev/azi setpoint.
                     // ?????????
                 }
@@ -339,7 +338,8 @@ void task_supervisor (void* p_params) //this task is actually the master task
             // hour_now = hour();
             // minute_now = minute();
             // second_now = second();
-
+            
+            std::chrono::steady_clock::now(); //get system time via c++ libraries
             // time_t time = now(); // store the current time in time variable 'time'
             // hour(time);          // returns the hour for the given time 'time' (0-23)
             // minute(time);        // returns the minute for the given time 'time' (0-59)
@@ -348,42 +348,37 @@ void task_supervisor (void* p_params) //this task is actually the master task
             // month(time);         // the month for the given time 'time' (1-12)
             // year(time);          // the year for the given time 'time' (2008, 2020, etc)
 
-            // Compare internet time to desired sequence start time
-            //TBD here, need to know format of deven's code. FOr now I'm pulling from these shares.
-            desired_day >> day;
-            desired_month >> month;
-            desired_year >> year;
-            desired_hour >> hour;
-            desired_minute >> minute;
-            desired_second >> second;
+            // pull desired sequence start time from queue
+            starttime_queue.get(year);
+            starttime_queue.get(month);
+            starttime_queue.get(day);
+            starttime_queue.get(hour);
+            starttime_queue.get(minute);
+            starttime_queue.get(second);
 
-            // // Check if we're ready to begin the sequence by comparing current time to desired start time
-            // if( (day(time) == day) && (month(time) == month) && (year(time) == year) ) {                    //first verify the correct date
-            //     if( (hour(time) == hour) && (minute(time) == minute) && (second(time) >= second) ) {    //next verify the correct time, seconds are triggered if time is >= desired ???
-            //         state = 2;    // start time reached, move into tracking state
-            //         Serial << "Date(Month/Day/Year): " << month(time) << "/" << day(time) << "/" << year(time) << "|  Time(hr/min/sec): " << hour(time) << "/" << minute(time) << "/" << second(time) <<  endl;
-            //         Serial << "Tracking State Begin. " << endl;
-            //     }
-            //     else{
-            //         // do nothing, we aren't ready to change state yet (not right time)
-            //     }
-            // }
-            // else{
-            //     // do nothing, we aren't ready to change state yet (not right date)
-            // }
+            // Check if we're ready to begin the sequence by comparing current time to desired start time
+            if( (day(time) == day) && (month(time) == month) && (year(time) == year) ) {                //first verify the correct date
+                if( (hour(time) == hour) && (minute(time) == minute) && (second(time) >= second) ) {    //next verify the correct time, seconds are triggered if time is >= desired ???
+                    state = 2;    // start time reached, move into tracking state
+                    Serial << "Date(Month/Day/Year): " << month(time) << "/" << day(time) << "/" << year(time) << "|  Time(hr/min/sec): " << hour(time) << "/" << minute(time) << "/" << second(time) <<  endl;
+                    Serial << "Tracking State Begin. " << endl;
+                }
+                else{
+                    // do nothing, we aren't ready to change state yet (not right time)
+                }
+            }
+            else{
+                // do nothing, we aren't ready to change state yet (not right date)
+                Serial << "Month/day/year does not match desired start month/day/year" << endl;
+            }
         } //end of state 1
 
         // 2. TRACK STATE (tracker carries out tracking sequence. Sweeps across sky.)
         else if(state == 2){
             start_condition << true_var;       // start tracking sequence (activate motor control)
-            // Changes increment (for calculating next position in coords task)
-            increment++;
-            if(increment == 180){
-                start_condition << false_var;
-            }
         }
 
-        // Supervisor task time delay
+        // Supervisor task time delay 
         vTaskDelay(1000);
         
     }
@@ -392,9 +387,12 @@ void task_supervisor (void* p_params) //this task is actually the master task
 
 
 
-/** @brief   Function which finds true north using magnetometer data, then resets
- *           azimuth encoders so that 0 = north. 
- *  @details TBD
+/** @brief   Function which homes the elvation encoder to 0 deg based on 
+ *           accelerometer readings. Then asks the user to manually
+ *           set the dish to north to home the azimuth encoder.
+ *  @details WARNING- this funciton only works if the dish is on SIDE A
+ *           of the SatTrack device. The elevation homing sequence will not
+ *           function if the accelerometer is upside down.
  */
 void task_home (void* p_params) {
     // Initialize Variables
@@ -414,7 +412,7 @@ void task_home (void* p_params) {
     bool home_var;
     float float_zero = 0;
     //temporary while we don't have azimuth calibration working
-    uint8_t countdown = 60000;
+    uint8_t countdown = 300;
 
     // Task loop
     for(;;){
@@ -436,7 +434,8 @@ void task_home (void* p_params) {
             if ((az >= -0.1) && (az <= 0.1)){
                 // arm is level, reset elevation encoder to 0, and then calibrate azimuth
                 analogWrite(19,0);                          // stop elevation motor 
-                elevation << float_zero;                    // reset elevation encoder 
+                clear_elevation << true_var;                // reset elevation encoder 
+                elevation_sp << float_zero;                 // elevation motor shouldn't move
                 Serial << "Elevation is appx level, encoders have been reset. Initiating azimuth calibration:" << endl;
                 // if(mag_heading == 0){                    // we *should* be facing north here for this to be true
                 //     azimuth << float_zero;               //reset azimuth encoder to 0
@@ -460,11 +459,12 @@ void task_home (void* p_params) {
                 Serial << "Countdown until azimuth encoder reset: " << countdown << endl;
                 delay(1000);
                 if (countdown <= 0){
-                    azimuth << float_zero;               // reset azimuth encoder to 0
+                    clear_azimuth << true_var;           // reset azimuth encoder 
+                    azimuth_sp << float_zero;            // azimuth motor shouldn't move
                     home_condition << false_var;         // move out of elev/azimuth homing!
                     first_position << true_var;          // move into first position of tracking sequence 
                     Serial << "Azimuth encoders have been reset. Moving to first position of tracking sequence" << endl;
-                    delay(5000)                   
+                    delay(5000);                   
                 }
 
             }
@@ -514,46 +514,42 @@ void task_control (void* p_params)
 
     // Motor Control Task Loop
     for (;;){
-        //check if we're supposed to be tracking at this moment in time
-        start_condition >> start;                  // check flag from share "start_condition"
-        if (start){
-            //pull data from shares
-            elevation_sp >> elv_sp;
-            azimuth_sp >> azi_sp;
-            elevation >> elv;
-            azimuth >> azi;
+        //pull data from shares
+        elevation_sp >> elv_sp;
+        azimuth_sp >> azi_sp;
+        elevation >> elv;
+        azimuth >> azi;
 
-            speed = gain*(elv_sp - elv)/(1000-n*5); //the times 5 is from the task timing, the 1000 comes from sup task timing
-            n++;
-            if(n == 200){ // can't divide by zero haha
-                n=0;
-            }
+        speed = gain*(elv_sp - elv)/(1000-n*5); //the times 5 is from the task timing, the 1000 comes from sup task timing
+        n++;
+        if(n == 200){ // can't divide by zero haha
+            n=0;
+        }
 
-            //Serial << speed << endl;
+        //Serial << speed << endl;
 
-            if (speed < 0){
-                digitalWrite(18,1);
-                elev_direction << true_var;
-            }
-            else if (speed > 0){
-                digitalWrite(18,0);
-                elev_direction << false_var;
-            }
-            else{
-                analogWrite(19,0);
-            }
+        if (speed < 0){
+            digitalWrite(18,1);
+            elev_direction << true_var;
+        }
+        else if (speed > 0){
+            digitalWrite(18,0);
+            elev_direction << false_var;
+        }
+        else{
+            analogWrite(19,0);
+        }
             
-            if (abs(speed) > 255){
-                duty_cycle = 255;
-            }
-            else{
-                duty_cycle = abs(speed);
-            }
-            analogWrite(19, duty_cycle);
-        } // runs if start = true
+        if (abs(speed) > 255){
+            duty_cycle = 255;
+        }
+        else{
+            duty_cycle = abs(speed);
+        }
+        analogWrite(19, duty_cycle);    // update motor speed
 
-        // Task delay
-        vTaskDelay(5);
+    // Task delay
+    vTaskDelay(5);
     }
 }
 
@@ -587,7 +583,7 @@ void task_coords (void* p_params)
     float timestep = 1;                 // [s?] value of time step
     float elevation_calc;               // contains final calc of desired elevation
     float azimuth;                      // contains the desired azimuth position
-    int currenttime;                    // contains current time
+    int currenttime=1;                    // contains current time
     bool start;                         // true if we are ready to start tracking
 
     // Initialize date variables to be placed inside shares
@@ -631,12 +627,14 @@ void task_coords (void* p_params)
         //place tracking data into shares for use with other tasks. If this doesn't change at every iteration maybe we can move this into the "init" part of the task
         elevation_sp << elevation_calc;      //place desired elevation setpoint into share
         azimuth_sp << azimuth;               //place desired azimuth setpoint into share
-        desired_day << day;
-        desired_month << month;
-        desired_year << year;
-        desired_hour << hour;                // military time (0-23)
-        desired_minute << minute;
-        desired_second << second;
+        
+        //place starting time info into queue
+        starttime_queue.put(year);
+        starttime_queue.put(month);
+        starttime_queue.put(day);
+        starttime_queue.put(hour);
+        starttime_queue.put(minute);
+        starttime_queue.put(second);
 
         // task delay
         vTaskDelay(1000);
