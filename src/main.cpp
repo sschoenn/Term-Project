@@ -42,7 +42,7 @@ Share<float> azimuth_sp("SP AZI");           // azimuth setpoint in milidegrees
 Share<bool> start_condition("start");        // true if we're ready to begin the tracking sequence
 Share<bool> home_condition("homing");        // true if the device is homing itself to first position
 Share<bool> first_position("1st POSITION");  // true if we're trying to move to the first position of the sequence (part of the home state)
-Queue<double> accelmag_queue (30);           // accel/mag queue of latest data
+Queue<double> accelmag_queue (6);            // queue of latest azimuth and elevation position data based on accel/mag readings
 // Ephemeris Shares, contain the time data used to track satellite
 Queue<uint8_t> starttime_queue (6);          // contains starting date details: year/month/day/hour/minute/second
 
@@ -62,10 +62,8 @@ void task_accelmag (void* p_params)
     double mx;        // magnetic orientation in x, y, z
     double my;
     double mz;
-    double pitch = 0;     // pitch, roll, and yaw (radians)
-    double roll = 0;
-    //double yaw = 0;
-    double mag_heading = 0;
+    double azi = 0;
+    double el = 0;
 
     // Initialize the I2C bus and accelerometer driver
     Wire.begin ();
@@ -92,44 +90,22 @@ void task_accelmag (void* p_params)
         mx = mevent.magnetic.x;
         my = mevent.magnetic.y;
         mz = mevent.magnetic.z;
+
+        // Calibrate Magnetometer
+        mx = mx - 3.5;
+        my = my + 61;
+        mz = mz + 252.5;
         
-        // Calculate pitch and roll (from accel)
-        pitch = atan2 (ay ,( sqrt ((ax * ax) + (az * az))));
-        roll = atan2(-ax ,( sqrt((ay* ay) + (az * az))));
-        
-        // Calculate magnetometer heading (THIS ONLY WORKS WHEN MAG IS HORIZONTAL TO THE EARTH)
-        //old code, this doesn't work.
-        if( (az > 9.8) && (az < 9.9) ){                 // check if mag is horizontal by reading gravity TEST THIS CODE
-            if (my < 0){
-                mag_heading = 270 - (atan2(my,mx) * 180/PI) ;    // heading in degrees CW from North    
-            }
-            else if (my > 0){
-                mag_heading = 90 - (atan2(my,mx) * 180/PI) ;    // heading in degrees CW from North
-            }
-            else if ((my == 0) && (mx < 0)){
-                mag_heading = 180 ;
-            }
-            else if ((my == 0) && (mx > 0)){
-                mag_heading = 0 ;
-            }
-        }
-        else{
-            mag_heading = 666;  //if accelerometer is not horizontal with ground
-        }
+        // Calculate magnetic heading
+        el = atan2(-az,ay);
+        azi = -atan2(mx, -my*sin(el) - mz*cos(el) );
         
         // Convert to deg
-        roll = roll*57.295;
-        pitch = pitch*57.295;
-        
-        accelmag_queue.put(ax);       // ax
-        accelmag_queue.put(ay);       // ay
-        accelmag_queue.put(az);       // az
-        accelmag_queue.put(mx);       // mx
-        accelmag_queue.put(my);       // my
-        accelmag_queue.put(mz);       // mz
-        accelmag_queue.put(roll);     // put roll in queue
-        accelmag_queue.put(pitch);    // put pitch value in queue
-        accelmag_queue.put(mag_heading); //put heading in queue
+        el = el*57.295;
+        azi = azi*57.295;
+
+        accelmag_queue.put(el);     // put current elevation into queue
+        accelmag_queue.put(azi);    // put current azimuth into queue
 
         delay(30);
     }
@@ -377,86 +353,55 @@ void task_supervisor (void* p_params) //this task is actually the master task
 void task_home (void* p_params) {
     // Initialize Variables
     //vars to hold accel/mag data
-    double ax;
-    double ay;
-    double az;
-    double mx;
-    double my;
-    double mz;
-    double roll;
-    double pitch;
-    double mag_heading = 666;            // some obscure default value that will never be an actual reading
+    double el;
+    double azi;
     // Need these redundant things for shares
     bool false_var = false;
     bool true_var = true;
     bool home_var;
     float float_zero = 0;
-    //temporary while we don't have azimuth calibration working
-    uint8_t countdown = 300;
 
     // Task loop
     for(;;){
         home_condition >> home_var;     //grab bool from share "home_condition"
         if(home_var){
             //grab current magnetometer data
-            accelmag_queue.get(ax);          // ax
-            accelmag_queue.get(ay);          // ay
-            accelmag_queue.get(az);          // az
-            accelmag_queue.get(mx);          // mx
-            accelmag_queue.get(my);          // my
-            accelmag_queue.get(mz);          // mz
-            accelmag_queue.get(roll);        // roll
-            accelmag_queue.get(pitch);       // pitch
-            accelmag_queue.get(mag_heading); // current heading CW from north
+            accelmag_queue.get(el);          // 
+            accelmag_queue.get(azi);         //             
 
             //THIS NEEDS TO BE TESTED
             // determine if elevation is 0 deg
-            if ((az >= -0.1) && (az <= 0.1)){
+            if ((el >= -0.1) && (el <= 0.1)){
                 // arm is level, reset elevation encoder to 0, and then calibrate azimuth
-                analogWrite(19,0);                          // stop elevation motor 
-                clear_elevation << true_var;                // reset elevation encoder 
-                elevation_sp << float_zero;                 // elevation motor shouldn't move
+                analogWrite(19,0);                       // stop elevation motor 
+                clear_elevation << true_var;             // reset elevation encoder 
+                elevation_sp << float_zero;              // elevation motor shouldn't move
                 Serial << "Elevation is appx level, encoders have been reset. Initiating azimuth calibration:" << endl;
-                // if(mag_heading == 0){                    // we *should* be facing north here for this to be true
-                //     azimuth << float_zero;               //reset azimuth encoder to 0
-                //     home_condition << false_var;         // move out of elev/azimuth homing!
-                //     first_position << true_var;          // move into first position of tracking sequence
-                // }
-                // else if (mag_heading > 0){               // azimuth isn't zeroed, move azimuth until north is reached
-                //     analogWrite(14,50);                  // rotate azimuth in negative direction until 0
-                // }
-                // else if (mag_heading < 0){               // azimuth isn't zeroed, rotate azimuth until north is reached
-                //     analogWrite(14,-50);                 // rotate azimuth in positive direction until 0
-                // }
-                // else if (mag_heading == 666){
-                //     Serial << "Error with homing, accel/mag does not read horizontal...fix the code probably" << endl;  //how did we get here if the prev if statement determined mag is level w/ground
-                //     delay(10000);
-                // } 
-                
-                // temporary azimuth calibration solution
-                countdown --;
-                Serial << "Please calibrate azimuth by hand. Point the dish northward." << endl;
-                Serial << "Countdown until azimuth encoder reset: " << countdown << endl;
-                delay(1000);
-                if (countdown <= 0){
-                    clear_azimuth << true_var;           // reset azimuth encoder 
-                    azimuth_sp << float_zero;            // azimuth motor shouldn't move
+                if(azi == 0){                            // we *should* be facing north here for this to be true
+                    clear_azimuth << true_var;           //reset azimuth encoder to 0
                     home_condition << false_var;         // move out of elev/azimuth homing!
-                    first_position << true_var;          // move into first position of tracking sequence 
+                    first_position << true_var;          // move into first position of tracking sequence
                     Serial << "Azimuth encoders have been reset. Moving to first position of tracking sequence" << endl;
-                    delay(5000);                   
+                    delay(5000);  
                 }
-
+                else if (azi > 0){                       // azimuth isn't zeroed, move azimuth until north is reached
+                    digitalWrite(12,0);
+                    analogWrite(14,50);                  // rotate azimuth in negative direction until 0
+                }
+                else if (azi < 0){                       // azimuth isn't zeroed, rotate azimuth until north is reached
+                    digitalWrite(12,1);
+                    analogWrite(14,50);                  // rotate azimuth in positive direction until 0
+                }
             }
-            else if (az > 0.1){
+            else if (el > 0.1){
                 digitalWrite(18,0);
                 analogWrite(19,50);                      //turn elev motor to make pitch 0
-                Serial << "Turning Elevation Motor FWD to increase pitch. az = " << az << endl;
+                Serial << "Turning Elevation Motor FWD to increase pitch. el = " << el << endl;
             }
-            else if (az < -0.1){
+            else if (el < -0.1){
                 digitalWrite(18,1);
                 analogWrite(19,50);                     //turn elev motor the other way to make pitch 0
-                Serial << "Turning Elevation Motor BWD to decrease pitch. az = " << az << endl;
+                Serial << "Turning Elevation Motor BWD to decrease pitch. el = " << el << endl;
             }
             // Task delay (moved delay to within the if statement so that there's only a delay if are currently running this task)
             vTaskDelay(5);
