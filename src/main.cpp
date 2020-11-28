@@ -27,9 +27,8 @@
 #include <analogWrite.h>
 #include <cmath>
 #include "TimeLib.h" //this isn't working
-#include <chrono>
-#include <ctime>
-
+#include <TimeLib.h>
+#include "TOD.h"
 
 /// Define Shares & Queues Below
 Share<float> elevation ("ELEV");             // current elevation in milidegrees
@@ -97,11 +96,6 @@ void task_accelmag (void* p_params)
         // Calculate pitch and roll (from accel)
         pitch = atan2 (ay ,( sqrt ((ax * ax) + (az * az))));
         roll = atan2(-ax ,( sqrt((ay* ay) + (az * az))));
-
-        // Calculate yaw (from mag)
-        //float Yh = (my * cos(roll)) - (mz * sin(roll));
-        //float Xh = (mx * cos(pitch))+(my * sin(roll)*sin(pitch)) + (mz * cos(roll) * sin(pitch));
-        //yaw =  atan2(Yh, Xh);
         
         // Calculate magnetometer heading (THIS ONLY WORKS WHEN MAG IS HORIZONTAL TO THE EARTH)
         //old code, this doesn't work.
@@ -332,21 +326,6 @@ void task_supervisor (void* p_params) //this task is actually the master task
         // 1. WAIT STATE (tracker is aligned at start position, checks current time from internet, compares to initial start time of sequence. move into state 2 when true.)
         else if(state == 1){
             // Check and store internet time
-            // year_now = year();
-            // month_now = month();
-            // day_now = day();
-            // hour_now = hour();
-            // minute_now = minute();
-            // second_now = second();
-            
-            std::chrono::steady_clock::now(); //get system time via c++ libraries
-            // time_t time = now(); // store the current time in time variable 'time'
-            // hour(time);          // returns the hour for the given time 'time' (0-23)
-            // minute(time);        // returns the minute for the given time 'time' (0-59)
-            // second(time);        // returns the second for the given time 'time' (0-59)
-            // day(time);           // the day for the given time 'time' (1-31_)
-            // month(time);         // the month for the given time 'time' (1-12)
-            // year(time);          // the year for the given time 'time' (2008, 2020, etc)
 
             // pull desired sequence start time from queue
             starttime_queue.get(year);
@@ -357,20 +336,21 @@ void task_supervisor (void* p_params) //this task is actually the master task
             starttime_queue.get(second);
 
             // Check if we're ready to begin the sequence by comparing current time to desired start time
-            if( (day(time) == day) && (month(time) == month) && (year(time) == year) ) {                //first verify the correct date
-                if( (hour(time) == hour) && (minute(time) == minute) && (second(time) >= second) ) {    //next verify the correct time, seconds are triggered if time is >= desired ???
-                    state = 2;    // start time reached, move into tracking state
-                    Serial << "Date(Month/Day/Year): " << month(time) << "/" << day(time) << "/" << year(time) << "|  Time(hr/min/sec): " << hour(time) << "/" << minute(time) << "/" << second(time) <<  endl;
-                    Serial << "Tracking State Begin. " << endl;
-                }
-                else{
-                    // do nothing, we aren't ready to change state yet (not right time)
-                }
-            }
-            else{
-                // do nothing, we aren't ready to change state yet (not right date)
-                Serial << "Month/day/year does not match desired start month/day/year" << endl;
-            }
+            // if( (day(time) == day) && (month(time) == month) && (year(time) == year) ) {                //first verify the correct date
+            //     if( (hour(time) == hour) && (minute(time) == minute) && (second(time) >= second) ) {    //next verify the correct time, seconds are triggered if time is >= desired ???
+            //         state = 2;    // start time reached, move into tracking state
+            //         Serial << "Date(Month/Day/Year): " << month(time) << "/" << day(time) << "/" << year(time) << "|  Time(hr/min/sec): " << hour(time) << "/" << minute(time) << "/" << second(time) <<  endl;
+            //         Serial << "Tracking State Begin. " << endl;
+            //     }
+            //     else{
+            //         // do nothing, we aren't ready to change state yet (not right time)
+            //     }
+            // }
+            // else{
+            //     // do nothing, we aren't ready to change state yet (not right date)
+            //     Serial << "Month/day/year does not match desired start month/day/year" << endl;
+            // }
+
         } //end of state 1
 
         // 2. TRACK STATE (tracker carries out tracking sequence. Sweeps across sky.)
@@ -642,6 +622,57 @@ void task_coords (void* p_params)
 }
 
 
+/** @brief   Task which receives data from a queue and prints it nicely.
+ *  @param   p_params Pointer to parameters passed to this function; we don't
+ *           expect to be passed anything and so ignore this pointer
+ */
+void task_time (void* p_params)
+{
+    // Initialize Variables
+    uint8_t year = 2020;
+    uint8_t month = 11;
+    uint8_t day = 28;
+    
+    TOD RTC; //Instantiate Time of Day class TOD as RTC
+
+    uint8_t lastminute=0;
+    uint8_t lastsecond=0;
+    char printbuffer[50];
+    bool TODvalid=false;
+
+    char ssid[] = "Clarks";                 // your network SSID (name)
+    char password[] = "numberonecat";       // your network password
+    
+    //Internet access setup
+    if(RTC.begin(ssid,password))TODvalid=true;   //.begin(ssid,password) requires SSID and password of your home access point
+                                               //All the action is in this one function.  It connects to access point, sends
+                                               //an NTP time query, and receives the time mark. Returns TRUE on success.
+    lastminute=RTC.minute();
+
+    // TASK LOOP!
+    for (;;){
+        // TIME STUFF (TOD library)
+        if(RTC.second()!=lastsecond && TODvalid){ //We want to perform this loop on the second, each second
+            lastsecond=RTC.second();
+            starttime_queue.put(year);
+            starttime_queue.put(month);
+            starttime_queue.put(day);
+            starttime_queue.put(RTC.hour());
+            starttime_queue.put(RTC.minute());
+            starttime_queue.put(RTC.second());
+            sprintf(printbuffer,"   UTC Time:%02i:%02i:%02i.%03i\n", RTC.hour(), RTC.minute(),RTC.second(),RTC.millisec());  //debug code
+            Serial<<printbuffer;                                                                                             //debug code
+        }
+        // Test code, delete this "if" later
+        if(RTC.minute()==lastminute+2 && TODvalid){ //Every 3 minutes, hit the NIST time server again (just to demonstrate)
+            lastminute=RTC.minute();
+            RTC.begin(ssid,password);
+        }
+        vTaskDelay(1000);  //1 second delay, needed for time timing.
+    }
+}
+
+
 /** @brief   Arduino setup function which runs once at program startup.
  *  @details This function sets up a serial port for communication and creates 
  *           the tasks which will be run.
@@ -693,6 +724,12 @@ void setup ()
     xTaskCreate (task_home,                       // homes the azimuth and elevation encoders
                  "homebound",
                  2000,
+                 NULL,
+                 6,
+                 NULL);
+    xTaskCreate (task_time,                       // keeps track of internet time
+                 "timey",
+                 4000,
                  NULL,
                  6,
                  NULL);
