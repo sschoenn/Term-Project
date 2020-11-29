@@ -29,6 +29,7 @@
 #include "TimeLib.h" //this isn't working
 #include <TimeLib.h>
 #include "TOD.h"
+#include "P13.h"
 
 /// Define Shares & Queues Below
 Share<float> elevation ("ELEV");             // current elevation in milidegrees
@@ -579,6 +580,56 @@ void task_coords (void* p_params)
     }
 }
 
+void task_new_coords (void* p_params)
+{
+    (void)p_params;                     // shuts up compiler warning
+
+    int year = 2020;
+    uint8_t month = 11;
+    uint8_t day = 29;
+    uint8_t h = 1;
+    uint8_t m = 53;
+    uint8_t s = 0;
+
+    DateTime local_time(year, month, day, h, m, s);
+
+    float LA = 35.6368759;
+    float LO = -120.6545022;
+    float HT = 732; //223m
+
+    Observer local_coords(LA,LO,HT);
+
+    const char * l1 = "1 33591U 09005A   20334.64686490  .00000028  00000-0  40559-4 0  9997"; //NOAA 19 TLE
+    const char * l2 = "2 33591  99.1943 344.2907 0013582 336.4368  23.6179 14.12441211608710";
+
+    Satellite Sat(l1,l2);
+
+    Sat.predict(local_time);
+
+    float alt;
+    float az;
+    float range;
+    float range_rate;
+
+    Sat.topo(&local_coords, alt, az, range, range_rate);
+
+    Serial << az << endl;
+
+
+
+    for (;;){
+
+        // task delay
+        m++;
+        local_time.settime(year, month, day, h, m, s);
+        Sat.predict(local_time);
+        Sat.topo(&local_coords, alt, az, range, range_rate);
+
+        Serial << "azimuth " << az << " altitude " << alt << endl;
+        vTaskDelay(1000);
+    }
+}
+
 
 /** @brief   Task which receives data from a queue and prints it nicely.
  *  @param   p_params Pointer to parameters passed to this function; we don't
@@ -648,32 +699,32 @@ void setup ()
     // The variable must be static so it exists when the task function runs
 
     // Create a task which reads accel/magnetometer data
-    xTaskCreate (task_accelmag,
-                 "AccelMag",                      // Name for printouts
-                 2000,                            // Stack size
-                 NULL,                            // Parameter(s) for task fn.
-                 4,                               // Priority
-                 NULL);                           // Task handle
+    // xTaskCreate (task_accelmag,
+    //              "AccelMag",                      // Name for printouts
+    //              2000,                            // Stack size
+    //              NULL,                            // Parameter(s) for task fn.
+    //              4,                               // Priority
+    //              NULL);                           // Task handle
     //Create a task which prints accelerometer data in a pretty way
-    xTaskCreate (task_supervisor,
-                 "Printy",                        // Name for printouts
-                 4000,                             // Stack size
-                 NULL,                            // Parameter(s) for task fn.
-                 20,                               // Priority
-                 NULL);                           // Task handle 
-    xTaskCreate (task_position,
-                 "position",                        // Name for printouts
-                 2000,                             // Stack size
-                 NULL,                            // Parameter(s) for task fn.
-                 5,                               // Priority
-                 NULL);                           // Task handle
-    xTaskCreate (task_control,
-                 "control",                        // Name for printouts
-                 2000,                             // Stack size
-                 NULL,                            // Parameter(s) for task fn.
-                 6,                               // Priority
-                 NULL);                           // Task handle
-    xTaskCreate (task_coords,
+    // xTaskCreate (task_supervisor,
+    //              "Printy",                        // Name for printouts
+    //              4000,                             // Stack size
+    //              NULL,                            // Parameter(s) for task fn.
+    //              20,                               // Priority
+    //              NULL);                           // Task handle 
+    // xTaskCreate (task_position,
+    //              "position",                        // Name for printouts
+    //              2000,                             // Stack size
+    //              NULL,                            // Parameter(s) for task fn.
+    //              5,                               // Priority
+    //              NULL);                           // Task handle
+    // xTaskCreate (task_control,
+    //              "control",                        // Name for printouts
+    //              2000,                             // Stack size
+    //              NULL,                            // Parameter(s) for task fn.
+    //              6,                               // Priority
+    //              NULL);                           // Task handle
+    xTaskCreate (task_new_coords,
                  "coordinates",                   // Name for printouts
                  15000,                           // Stack size
                  NULL,                            // Parameter(s) for task fn.
