@@ -560,7 +560,6 @@ void task_coords (void* p_params)
         }
 
         azimuth = azimuth*1000;  //convert to millidegrees
-        Serial << "Azimuth setpoint: " << azimuth;
 
         //Serial << "az: " << azimuth << "  " << "el: " << elevation_calc << endl;
         //place tracking data into shares for use with other tasks. If this doesn't change at every iteration maybe we can move this into the "init" part of the task
