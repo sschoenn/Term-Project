@@ -39,12 +39,14 @@ Share<bool> elev_direction("ELEV DIR");      // either a 1 or 0 to represent dir
 Share<bool> azi_direction("AZI DIR");        // either a 1 or 0 to represent direction of the elev motor
 Share<float> elevation_sp("SP ELEV");        // elevation setpoint in milidegrees
 Share<float> azimuth_sp("SP AZI");           // azimuth setpoint in milidegrees
-Share<bool> start_condition("start");        // true if we're ready to begin the tracking sequence
+Share<bool> start("start");        // true if we're ready to begin the tracking sequence
 Share<bool> home_condition("homing");        // true if the device is homing itself to first position
 Share<bool> first_position("1st POSITION");  // true if we're trying to move to the first position of the sequence (part of the home state)
-Queue<double> accelmag_queue (6);            // queue of latest azimuth and elevation position data based on accel/mag readings
+Share<float> mag("6");
+Share<float> accel ("6");            // queue of latest azimuth and elevation position data based on accel/mag readings
 // Ephemeris Shares, contain the time data used to track satellite
-Queue<uint8_t> starttime_queue (6);          // contains starting date details: year/month/day/hour/minute/second
+Share<uint8_t> starttime_queue ("6");          // contains starting date details: year/month/day/hour/minute/second
+Share<float> elevation_coords("cords");
 
 
 /** @brief   Task which talks to the FXOS8700 accelerometer/magnetometer, and  
@@ -62,8 +64,8 @@ void task_accelmag (void* p_params)
     double mx;        // magnetic orientation in x, y, z
     double my;
     double mz;
-    double azi = 0;
-    double el = 0;
+    float azi = 0;
+    float el = 0;
 
     // Initialize the I2C bus and accelerometer driver
     Wire.begin ();
@@ -92,9 +94,9 @@ void task_accelmag (void* p_params)
         mz = mevent.magnetic.z;
 
         // Calibrate Magnetometer
-        mx = mx + 7.15;
-        my = my + 21.65;
-        mz = mz - 28;
+        mx = mx + 53.5;
+        my = my + 74.25;
+        mz = mz - 74.25;
         
         // Calculate magnetic heading
         el = atan2(-az,ay);
@@ -104,8 +106,8 @@ void task_accelmag (void* p_params)
         el = el*57.295;
         azi = azi*57.295;
 
-        accelmag_queue.put(el);     // put current elevation into queue
-        accelmag_queue.put(azi);    // put current azimuth into queue
+        accel.put(el);     // put current elevation into queue
+        mag.put(azi);    // put current azimuth into queue
 
         delay(30);
     }
@@ -128,17 +130,22 @@ void task_position (void* p_params)
     
     // Initialize Variables
     bool el_prev_state = false;
-    bool clear = false;
-    bool false_var = false;     //you can't just pass true or false into a share it needs to be in a var
-    bool true_var = true;
-    int zero = 0;
-    int az_tics = 0;
+    bool azi_prev_state = false;
+    bool el_clear = false;
+    bool azi_clear = false;
+    int azi_tics = 0;
     int el_tics = 0;
     int int_dummy = 0;
-    bool elev_dir;              //elevation direction
+    bool elev_dir;              //direction of elevation motor
+    bool azi_dir;               //direction of azimuth motor
     float el_deg;
-
-    bool az_prev_state = false;
+    float azi_deg;
+    float el_val;
+    float azi_val;
+    // Redundant variables needed to update shares
+    bool false_var = false;     
+    bool true_var = true;
+    int zero = 0;
 
     pinMode(26, INPUT);         //Setup for elevation ADC pin
     pinMode(27, INPUT);         //Setup for azimuth ADC pin
@@ -147,30 +154,37 @@ void task_position (void* p_params)
     for (;;)
     {   
         // Serial << analogRead(26) << " previous state " << el_prev_state << endl;      //debug code
-        clear_elevation >> clear;              //grab clear_elevation bool (either true or false?)
-        elev_direction >> elev_dir;            //set elevation motor direction
+        clear_elevation >> el_clear;           //grab clear_elevation bool
+        clear_azimuth >> azi_clear;            //grab clear_azimuth bool
+        elev_direction >> elev_dir;            //grab current elevation motor direction
+        azi_direction >> azi_dir;              //grab current azimuth motor direction
         
         // Runs if the elevation encoder position must be reset
-        if (clear){
+        if (el_clear){
             el_tics = 0;                       //reset elevation encoder position to 0
+            elevation >> el_val;
+            el_tics = el_val*80;
             clear_elevation << false_var;      //resets clear_elevation flag for the next call
         }
+        // Runs if the azimuth encoder position must be reset
+        if (azi_clear){
+            azi_tics = 0;                      //reset azimuth encoder position to 0
+            azimuth >> azi_val;
+            azi_tics = azi_val*80;
+            clear_azimuth << false_var;        //resets clear_azimuth flag for the next call
+        }
 
-        // Runs if the encoder reads high and if it has changed states since the last function call
+        // Runs if the elevation encoder reads high and if it has changed states since the last function call
         if ((analogRead(26) > 3500) && el_prev_state==false){
-            
             el_prev_state = true;
-            
             // If the motor is spinning forward, increment encoder count
             if (elev_dir){
                 el_tics++;
-                //Serial<<el_tics<< "if" <<elev_dir << endl;
             }
             
             // If the motor is spinning in reverse, decrement encoder count
             else if (!elev_dir){  
                 el_tics--;
-                //Serial<<el_tics<< "if else" <<elev_dir << endl;
             }
 
             else{
@@ -244,6 +258,8 @@ void task_supervisor (void* p_params) //this task is actually the master task
     uint8_t hour_now;
     uint8_t minute_now;
     uint8_t second_now;
+
+    uint8_t wait = 0;
     
     // Place initial values into queues
     elevation_sp << float_zero;       // sets initial elevation setpoint = 0
@@ -278,38 +294,48 @@ void task_supervisor (void* p_params) //this task is actually the master task
         home_condition >> home_bool;  // grab bool from share 'home_condition' and place into home_bool
         first_position >> first_position_var; // grab bool from share 'first_position', place into first_position_var
 
-        //Serial << "State " << state << " | Current Elev: " << elevation_val << " | Elev sp: " << el_sp << " | Current Azi: " << azimuth_val << " | Azi sp: " << azi_sp << endl;
+        Serial << "State " << state << " | Current Elev: " << elevation_val << " | Elev sp: " << el_sp << " | Current Azi: " << azimuth_val << " | Azi sp: " << azi_sp << endl;
 
         /// 0-2: SUPERVISOR TASK STATE MACHINE
         // 0. HOME STATE (run at initial power-up; read magnetometer and move to start location of next sattrack sequence. then move to state 1)
         if(state == 0){
-            //elevation_sp << (sp_lut[increment]);      //old code, idk what this does
-            if(home_bool == false){                      // Check if the home task is still homing the tracker
-                if(first_position_var == true){         // Azimuth encoders are homed to north, but we still need to check if we're in the starting position
-                    //move to the initial track position, which should be contained in azimuth_sp and elevation_sp
-                    //turn on motor control and feed it the very first elev/azi setpoint.
-                    // ?????????
-                }
-                else if(first_position_var == false){   //we've zeroed the azimuth encoders to north, AND we're in the initial position
-                    state = 1;                          // move into state 1 if home_bool is set to false. This flag is set to false only in the homing task.
-                }
+            elevation_sp << elevation_val;
+            if (wait < 4){
+                wait++;
             }
-            else if(home_bool == true){
-                // do nothing, we're still homing azimuth encoders
+            else{
+                accel >> elevation_val;
+                mag >> azimuth_val;
+                elevation << elevation_val;
+                clear_elevation << true_var;
+                elevation_coords >> el_sp;
+                Serial << el_sp << endl;
+                elevation_sp << el_sp;
+                Serial << el_sp << endl;
+                state = 1;
             }
+            
         } //end of state 0
         
         // 1. WAIT STATE (tracker is aligned at start position, checks current time from internet, compares to initial start time of sequence. move into state 2 when true.)
         else if(state == 1){
+            if(wait < 30){
+                wait++;
+            }
+            else{
+            start << true_var;       // start tracking sequence (activate motor control)
+            state = 2;
+            }
+            }
             // Check and store internet time
 
             // pull desired sequence start time from queue
-            starttime_queue.get(year);
-            starttime_queue.get(month);
-            starttime_queue.get(day);
-            starttime_queue.get(hour);
-            starttime_queue.get(minute);
-            starttime_queue.get(second);
+            // starttime_queue.get(year);
+            // starttime_queue.get(month);
+            // starttime_queue.get(day);
+            // starttime_queue.get(hour);
+            // starttime_queue.get(minute);
+            // starttime_queue.get(second);
 
             // Check if we're ready to begin the sequence by comparing current time to desired start time
             // if( (day(time) == day) && (month(time) == month) && (year(time) == year) ) {                //first verify the correct date
@@ -327,11 +353,15 @@ void task_supervisor (void* p_params) //this task is actually the master task
             //     Serial << "Month/day/year does not match desired start month/day/year" << endl;
             // }
 
-        } //end of state 1
+         //end of state 1
 
         // 2. TRACK STATE (tracker carries out tracking sequence. Sweeps across sky.)
         else if(state == 2){
-            start_condition << true_var;       // start tracking sequence (activate motor control)
+            elevation_coords >> el_sp;
+            elevation_sp << el_sp;
+        }
+        else if(state == 3){
+            1+1;
         }
 
         // Supervisor task time delay 
@@ -340,78 +370,6 @@ void task_supervisor (void* p_params) //this task is actually the master task
     }
 }
 
-
-
-
-/** @brief   Function which homes the elvation encoder to 0 deg based on 
- *           accelerometer readings. Then asks the user to manually
- *           set the dish to north to home the azimuth encoder.
- *  @details WARNING- this funciton only works if the dish is on SIDE A
- *           of the SatTrack device. The elevation homing sequence will not
- *           function if the accelerometer is upside down.
- */
-void task_home (void* p_params) {
-    // Initialize Variables
-    //vars to hold accel/mag data
-    double el;
-    double azi;
-    // Need these redundant things for shares
-    bool false_var = false;
-    bool true_var = true;
-    bool home_var;
-    float float_zero = 0;
-    float motor_fwd = 90000;
-    float motor_bwd = -90000;
-
-    // Task loop
-    for(;;){
-        home_condition >> home_var;     //grab bool from share "home_condition"
-        if(home_var){
-            //grab current magnetometer data
-            accelmag_queue.get(el);          // 
-            accelmag_queue.get(azi);         //             
-
-            //THIS NEEDS TO BE TESTED
-            // determine if elevation is 0 deg
-            if ((el >= -0.1) && (el <= 0.1)){            //
-                // arm is level, reset elevation encoder to 0, and then calibrate azimuth
-                analogWrite(19,0);                       // stop elevation motor 
-                clear_elevation << true_var;             // reset elevation encoder 
-                elevation_sp << float_zero;              // elevation motor shouldn't move
-
-                if(azi == 0){                            // we *should* be facing north here for this to be true
-                    clear_azimuth << true_var;           //reset azimuth encoder to 0
-                    home_condition << false_var;         // move out of elev/azimuth homing!
-                    first_position << true_var;          // move into first position of tracking sequence
-                    Serial << "Azimuth encoders have been reset. Moving to first position of tracking sequence" << endl;
-                    delay(5000);  
-                }
-                else if (azi > 0){                       // azimuth isn't zeroed, move azimuth until north is reached
-                    digitalWrite(12,0);
-                    analogWrite(14,150);                  // rotate azimuth in negative direction until 0
-                    Serial << "Current Azimuth: " << azi << endl;
-                }
-                else if (azi < 0){                       // azimuth isn't zeroed, rotate azimuth until north is reached
-                    digitalWrite(12,1);
-                    analogWrite(14,150);                  // rotate azimuth in positive direction until 0
-                    Serial << "Current Azimuth: " << azi << endl;
-                }
-            }
-            else if (el > 0.5){
-                elevation_sp << motor_fwd;                //turn elev motor backward
-                Serial << "Turning Elevation Motor BWD to decrease pitch. el = " << el << endl;
-            }
-            else if (el < -0.5){
-                elevation_sp << motor_bwd;                //turn elev motor fwd
-                Serial << "Turning Elevation Motor FWD to increase pitch. el = " << el << endl;
-            }
-            // Task delay (moved delay to within the if statement so that there's only a delay if are currently running this task)
-            vTaskDelay(5);
-        }
-        
-        //vTaskDelay(5);  //moved to above, see note. It should work like that....
-    }
-}
 
 
 
@@ -429,7 +387,7 @@ void task_control (void* p_params)
     float azi_sp = 0;
     float elv;
     float azi;
-    float gain = -10;        //IMPORTANT make sure its negative for stability, adjust this to change control loop
+    float gain = -50;        //IMPORTANT make sure its negative for stability, adjust this to change control loop
     bool false_var = false;
     bool true_var = true;
     uint8_t duty_cycle;
@@ -456,11 +414,11 @@ void task_control (void* p_params)
         //Serial << speed << endl;
 
         if (speed < 0){
-            digitalWrite(18,1);
+            digitalWrite(18,0);
             elev_direction << true_var;
         }
         else if (speed > 0){
-            digitalWrite(18,0);
+            digitalWrite(18,1);
             elev_direction << false_var;
         }
         else{
@@ -508,10 +466,10 @@ void task_coords (void* p_params)
     float alpha;                        //
     float pi = 3.141592653589793;       // contains value of pi
     float timestep = 1;                 // [s?] value of time step
-    float elevation_calc;               // contains final calc of desired elevation
+    float elevation_calc = 0;               // contains final calc of desired elevation
     float azimuth;                      // contains the desired azimuth position
     int currenttime=1;                    // contains current time
-    bool start;                         // true if we are ready to start tracking
+    bool start_flag = false;                         // true if we are ready to start tracking
 
     // Initialize date variables to be placed inside shares
     uint8_t day = 23;                   // contains the day of the month (0-31) 
@@ -520,7 +478,7 @@ void task_coords (void* p_params)
     uint8_t hour = 15;                  // contains hour, military time (0-23)
     uint8_t minute = 30;                // contains minutes (0-59)
     uint8_t second = 30;                // contains seconds (0-59)
-
+    start << start_flag;
     // Task Loop
     for (;;){
         latsat = latsat0 + vsat/(earthradius + altitude)*currenttime;
@@ -544,15 +502,16 @@ void task_coords (void* p_params)
         {
             azimuth = alpha*180/pi;
         }
-        start_condition >> start;
-        if (start){
+
+        start >> start_flag;
+        
+        if (start_flag){
             currenttime += timestep;
         }
-        currenttime += timestep;
 
         //Serial << "az: " << azimuth << "  " << "el: " << elevation_calc << endl;
         //place tracking data into shares for use with other tasks. If this doesn't change at every iteration maybe we can move this into the "init" part of the task
-        elevation_sp << elevation_calc;      //place desired elevation setpoint into share
+        elevation_coords << elevation_calc;      //place desired elevation setpoint into share'
         azimuth_sp << azimuth;               //place desired azimuth setpoint into share
         
         //place starting time info into queue
@@ -604,9 +563,9 @@ void task_time (void* p_params)
             starttime_queue.put(year);
             starttime_queue.put(month);
             starttime_queue.put(day);
-            starttime_queue.put(RTC.hour());
-            starttime_queue.put(RTC.minute());
-            starttime_queue.put(RTC.second());
+            // starttime_queue.put(RTC.hour());
+            // starttime_queue.put(RTC.minute());
+            // starttime_queue.put(RTC.second());
             sprintf(printbuffer,"   UTC Time:%02i:%02i:%02i.%03i\n", RTC.hour(), RTC.minute(),RTC.second(),RTC.millisec());  //debug code
             Serial<<printbuffer;                                                                                             //debug code
         }
@@ -648,7 +607,7 @@ void setup ()
                  "Printy",                        // Name for printouts
                  4000,                             // Stack size
                  NULL,                            // Parameter(s) for task fn.
-                 8,                               // Priority
+                 20,                               // Priority
                  NULL);                           // Task handle 
     xTaskCreate (task_position,
                  "position",                        // Name for printouts
@@ -664,22 +623,16 @@ void setup ()
                  NULL);                           // Task handle
     xTaskCreate (task_coords,
                  "coordinates",                   // Name for printouts
-                 10000,                           // Stack size
+                 15000,                           // Stack size
                  NULL,                            // Parameter(s) for task fn.
-                 9,                               // Priority
+                 12,                               // Priority
                  NULL);        
-    xTaskCreate (task_home,                       // homes the azimuth and elevation encoders
-                 "homebound",
-                 2000,
-                 NULL,
-                 6,
-                 NULL);
-    xTaskCreate (task_time,                       // keeps track of internet time
-                 "timey",
-                 4000,
-                 NULL,
-                 6,
-                 NULL);
+    // xTaskCreate (task_time,                       // keeps track of internet time
+    //              "timey",
+    //              4000,
+    //              NULL,
+    //              6,
+    //              NULL);
 
     // If using an STM32, we need to call the scheduler startup function now;
     // if using an ESP32, it has already been called for us
