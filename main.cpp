@@ -279,7 +279,7 @@ void task_supervisor (void* p_params) //this task is actually the master task
     uint8_t hour_now;
     uint8_t minute_now;
     uint8_t second_now;
-
+    float azi_heading = 160;
     uint8_t wait = 0;
     
     // Place initial values into queues
@@ -331,10 +331,12 @@ void task_supervisor (void* p_params) //this task is actually the master task
                 mag >> azimuth_val;
                 elevation << elevation_val;
                 clear_elevation << true_var;
+                azimuth << azi_heading;
+                clear_azimuth << true_var;
                 elevation_coords >> el_sp;
-                Serial << el_sp << endl;
                 elevation_sp << el_sp;
-                Serial << el_sp << endl;
+                azimuth_coords >> azi_sp;
+                azimuth_sp << azi_sp;
                 state = 1;
             }
             
@@ -342,7 +344,7 @@ void task_supervisor (void* p_params) //this task is actually the master task
         
         // 1. WAIT STATE (tracker is aligned at start position, checks current time from internet, compares to initial start time of sequence. move into state 2 when true.)
         else if(state == 1){
-            if(wait < 30){
+            if(wait < 60){
                 wait++;
             }
             else{
@@ -583,12 +585,15 @@ void task_coords (void* p_params)
 void task_new_coords (void* p_params)
 {
     (void)p_params;                     // shuts up compiler warning
+    
+    bool start_flag = false;
+    start << start_flag;
 
     int year = 2020;
     uint8_t month = 11;
     uint8_t day = 29;
     uint8_t h = 1;
-    uint8_t m = 53;
+    uint8_t m = 59;
     uint8_t s = 0;
 
     DateTime local_time(year, month, day, h, m, s);
@@ -613,19 +618,37 @@ void task_new_coords (void* p_params)
 
     Sat.topo(&local_coords, alt, az, range, range_rate);
 
-    Serial << az << endl;
 
 
 
     for (;;){
 
-        // task delay
-        m++;
-        local_time.settime(year, month, day, h, m, s);
+        start >> start_flag;
+        
+        if (start_flag){
+            s++;
+        }
+        
+
+        if (s == 60){
+            s = 0;
+            m++;
+        }
+        if (m == 60){
+            m = 0;
+            h++;
+        }
+        local_time.settime(year, month, day, h, m, s); //UTC
         Sat.predict(local_time);
         Sat.topo(&local_coords, alt, az, range, range_rate);
 
-        Serial << "azimuth " << az << " altitude " << alt << endl;
+        az *= 1000;
+        alt *= 1000;
+
+        elevation_coords << alt;
+        azimuth_coords << az;
+
+        //Serial << "azimuth " << az << " altitude " << alt << endl;
         vTaskDelay(1000);
     }
 }
@@ -699,31 +722,31 @@ void setup ()
     // The variable must be static so it exists when the task function runs
 
     // Create a task which reads accel/magnetometer data
-    // xTaskCreate (task_accelmag,
-    //              "AccelMag",                      // Name for printouts
-    //              2000,                            // Stack size
-    //              NULL,                            // Parameter(s) for task fn.
-    //              4,                               // Priority
-    //              NULL);                           // Task handle
+    xTaskCreate (task_accelmag,
+                 "AccelMag",                      // Name for printouts
+                 2000,                            // Stack size
+                 NULL,                            // Parameter(s) for task fn.
+                 4,                               // Priority
+                 NULL);                           // Task handle
     //Create a task which prints accelerometer data in a pretty way
-    // xTaskCreate (task_supervisor,
-    //              "Printy",                        // Name for printouts
-    //              4000,                             // Stack size
-    //              NULL,                            // Parameter(s) for task fn.
-    //              20,                               // Priority
-    //              NULL);                           // Task handle 
-    // xTaskCreate (task_position,
-    //              "position",                        // Name for printouts
-    //              2000,                             // Stack size
-    //              NULL,                            // Parameter(s) for task fn.
-    //              5,                               // Priority
-    //              NULL);                           // Task handle
-    // xTaskCreate (task_control,
-    //              "control",                        // Name for printouts
-    //              2000,                             // Stack size
-    //              NULL,                            // Parameter(s) for task fn.
-    //              6,                               // Priority
-    //              NULL);                           // Task handle
+    xTaskCreate (task_supervisor,
+                 "Printy",                        // Name for printouts
+                 4000,                             // Stack size
+                 NULL,                            // Parameter(s) for task fn.
+                 20,                               // Priority
+                 NULL);                           // Task handle 
+    xTaskCreate (task_position,
+                 "position",                        // Name for printouts
+                 2000,                             // Stack size
+                 NULL,                            // Parameter(s) for task fn.
+                 5,                               // Priority
+                 NULL);                           // Task handle
+    xTaskCreate (task_control,
+                 "control",                        // Name for printouts
+                 2000,                             // Stack size
+                 NULL,                            // Parameter(s) for task fn.
+                 6,                               // Priority
+                 NULL);                           // Task handle
     xTaskCreate (task_new_coords,
                  "coordinates",                   // Name for printouts
                  15000,                           // Stack size
