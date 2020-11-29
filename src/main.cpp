@@ -92,9 +92,9 @@ void task_accelmag (void* p_params)
         mz = mevent.magnetic.z;
 
         // Calibrate Magnetometer
-        mx = mx - 3.5;
-        my = my + 61;
-        mz = mz + 252.5;
+        mx = mx + 7.15;
+        my = my + 21.65;
+        mz = mz - 28;
         
         // Calculate magnetic heading
         el = atan2(-az,ay);
@@ -360,6 +360,8 @@ void task_home (void* p_params) {
     bool true_var = true;
     bool home_var;
     float float_zero = 0;
+    float motor_fwd = 90000;
+    float motor_bwd = -90000;
 
     // Task loop
     for(;;){
@@ -371,12 +373,12 @@ void task_home (void* p_params) {
 
             //THIS NEEDS TO BE TESTED
             // determine if elevation is 0 deg
-            if ((el >= -0.1) && (el <= 0.1)){
+            if ((el >= -0.1) && (el <= 0.1)){            //
                 // arm is level, reset elevation encoder to 0, and then calibrate azimuth
                 analogWrite(19,0);                       // stop elevation motor 
                 clear_elevation << true_var;             // reset elevation encoder 
                 elevation_sp << float_zero;              // elevation motor shouldn't move
-                Serial << "Elevation is appx level, encoders have been reset. Initiating azimuth calibration:" << endl;
+
                 if(azi == 0){                            // we *should* be facing north here for this to be true
                     clear_azimuth << true_var;           //reset azimuth encoder to 0
                     home_condition << false_var;         // move out of elev/azimuth homing!
@@ -386,22 +388,22 @@ void task_home (void* p_params) {
                 }
                 else if (azi > 0){                       // azimuth isn't zeroed, move azimuth until north is reached
                     digitalWrite(12,0);
-                    analogWrite(14,50);                  // rotate azimuth in negative direction until 0
+                    analogWrite(14,150);                  // rotate azimuth in negative direction until 0
+                    Serial << "Current Azimuth: " << azi << endl;
                 }
                 else if (azi < 0){                       // azimuth isn't zeroed, rotate azimuth until north is reached
                     digitalWrite(12,1);
-                    analogWrite(14,50);                  // rotate azimuth in positive direction until 0
+                    analogWrite(14,150);                  // rotate azimuth in positive direction until 0
+                    Serial << "Current Azimuth: " << azi << endl;
                 }
             }
-            else if (el > 0.1){
-                digitalWrite(18,0);
-                analogWrite(19,50);                      //turn elev motor to make pitch 0
-                Serial << "Turning Elevation Motor FWD to increase pitch. el = " << el << endl;
-            }
-            else if (el < -0.1){
-                digitalWrite(18,1);
-                analogWrite(19,50);                     //turn elev motor the other way to make pitch 0
+            else if (el > 0.5){
+                elevation_sp << motor_fwd;                //turn elev motor backward
                 Serial << "Turning Elevation Motor BWD to decrease pitch. el = " << el << endl;
+            }
+            else if (el < -0.5){
+                elevation_sp << motor_bwd;                //turn elev motor fwd
+                Serial << "Turning Elevation Motor FWD to increase pitch. el = " << el << endl;
             }
             // Task delay (moved delay to within the if statement so that there's only a delay if are currently running this task)
             vTaskDelay(5);
@@ -427,7 +429,7 @@ void task_control (void* p_params)
     float azi_sp = 0;
     float elv;
     float azi;
-    float gain = -50;        //IMPORTANT make sure its negative for stability, adjust this to change control loop
+    float gain = -10;        //IMPORTANT make sure its negative for stability, adjust this to change control loop
     bool false_var = false;
     bool true_var = true;
     uint8_t duty_cycle;
@@ -609,10 +611,10 @@ void task_time (void* p_params)
             Serial<<printbuffer;                                                                                             //debug code
         }
         // Test code, delete this "if" later
-        if(RTC.minute()==lastminute+2 && TODvalid){ //Every 3 minutes, hit the NIST time server again (just to demonstrate)
-            lastminute=RTC.minute();
-            RTC.begin(ssid,password);
-        }
+        // if(RTC.minute()==lastminute+2 && TODvalid){ //Every 3 minutes, hit the NIST time server again (just to demonstrate)
+        //     lastminute=RTC.minute();
+        //     RTC.begin(ssid,password);
+        // }
         vTaskDelay(1000);  //1 second delay, needed for time timing.
     }
 }
