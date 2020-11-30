@@ -115,6 +115,7 @@ void task_accelmag (void* p_params)
     }
 }
 
+
 /** @brief   Task that interfaces with transmission sensors to implement an
  *           encoder, this task updates the current position read from the encoders
  *  @param   p_params Pointer to parameters passed to this function; we don't
@@ -152,6 +153,14 @@ void task_position (void* p_params)
     pinMode(26, INPUT);         //Setup for elevation ADC pin
     pinMode(27, INPUT);         //Setup for azimuth ADC pin
 
+    //TEMPORARY CODE for calibrating azimuth
+    clear_azimuth << false_var;        //resets azi encoder position
+    clear_elevation << false_var;
+    elev_direction << false_var;
+    azi_direction << true_var;
+    // Motor driver setup for PH/EN Mode
+
+
     // Encoder Position Task Loop
     for (;;)
     {   
@@ -165,17 +174,16 @@ void task_position (void* p_params)
         if (el_clear){
             el_tics = 0;                       //reset elevation encoder position to 0
             elevation >> el_val;
-            el_tics = el_val*80;
+            el_tics = el_val*75.79;
             clear_elevation << false_var;      //resets clear_elevation flag for the next call
         }
         // Runs if the azimuth encoder position must be reset
         if (azi_clear){
             azi_tics = 0;                      //reset azimuth encoder position to 0
             azimuth >> azi_val;
-            azi_tics = azi_val*80;
+            azi_tics = azi_val*197.35;
             clear_azimuth << false_var;        //resets clear_azimuth flag for the next call
         }
-
         // Runs if the elevation encoder reads high and if it has changed states since the last function call
         if ((analogRead(26) > 3500) && el_prev_state==false){
             el_prev_state = true;
@@ -195,7 +203,6 @@ void task_position (void* p_params)
         else if((analogRead(26) < 3000) && (el_prev_state==true)){
             el_prev_state = false;
         }
-        
         // Runs if the azimuth encoder reads high and if it has changed states since the last function call
         if ((analogRead(27) > 3500) && azi_prev_state==false){
             azi_prev_state = true;
@@ -215,15 +222,16 @@ void task_position (void* p_params)
         else if((analogRead(27) < 3000) && (azi_prev_state==true)){
             azi_prev_state = false;
         }
-
         // Convert encoder ticks to position (deg)
-        el_deg = (12.5*el_tics);         // convert from ticks to degrees of rotation
+        el_deg = (13.194*el_tics);       // convert encoder ticks to millidegrees of rotation (12.5 millideg/elev tic)
         elevation << el_deg;             // Place current position into elevation share
-        azi_deg = (8.3*azi_tics);
+        azi_deg = (5.067*azi_tics);      // converts encoder ticks to millidegrees of rotation (4.81?)
         azimuth << azi_deg;              // Place current position into elevation share
         
+        //temp elevation encoder test code
+       
         // Task delay
-        vTaskDelay(1);
+        vTaskDelay(1); //delay of 1
     }
 }
 
@@ -279,7 +287,7 @@ void task_supervisor (void* p_params) //this task is actually the master task
     uint8_t hour_now;
     uint8_t minute_now;
     uint8_t second_now;
-    float azi_heading = 160;
+    float azi_heading = 150;
     uint8_t wait = 0;
     
     // Place initial values into queues
@@ -344,7 +352,7 @@ void task_supervisor (void* p_params) //this task is actually the master task
         
         // 1. WAIT STATE (tracker is aligned at start position, checks current time from internet, compares to initial start time of sequence. move into state 2 when true.)
         else if(state == 1){
-            if(wait < 60){
+            if(wait < 120){
                 wait++;
             }
             else{
@@ -399,9 +407,6 @@ void task_supervisor (void* p_params) //this task is actually the master task
         
     }
 }
-
-
-
 
 
 /** @brief   Function which generates the tracking sequence heading positions.
@@ -582,6 +587,7 @@ void task_coords (void* p_params)
     }
 }
 
+
 void task_new_coords (void* p_params)
 {
     (void)p_params;                     // shuts up compiler warning
@@ -728,32 +734,31 @@ void setup ()
                  NULL,                            // Parameter(s) for task fn.
                  4,                               // Priority
                  NULL);                           // Task handle
-    //Create a task which prints accelerometer data in a pretty way
     xTaskCreate (task_supervisor,
                  "Printy",                        // Name for printouts
-                 4000,                             // Stack size
+                 4000,                            // Stack size
                  NULL,                            // Parameter(s) for task fn.
-                 20,                               // Priority
+                 20,                              // Priority
                  NULL);                           // Task handle 
     xTaskCreate (task_position,
-                 "position",                        // Name for printouts
-                 2000,                             // Stack size
+                 "position",                      // Name for printouts
+                 2000,                            // Stack size
                  NULL,                            // Parameter(s) for task fn.
                  5,                               // Priority
                  NULL);                           // Task handle
     xTaskCreate (task_control,
-                 "control",                        // Name for printouts
-                 2000,                             // Stack size
+                 "control",                       // Name for printouts
+                 2000,                            // Stack size
                  NULL,                            // Parameter(s) for task fn.
                  6,                               // Priority
                  NULL);                           // Task handle
     xTaskCreate (task_new_coords,
-                 "coordinates",                   // Name for printouts
-                 15000,                           // Stack size
-                 NULL,                            // Parameter(s) for task fn.
-                 12,                               // Priority
+                 "coordinates",                  // Name for printouts
+                 15000,                          // Stack size
+                 NULL,                           // Parameter(s) for task fn.
+                 12,                             // Priority
                  NULL);        
-    // xTaskCreate (task_time,                       // keeps track of internet time
+    // xTaskCreate (task_time,                      // keeps track of internet time
     //              "timey",
     //              4000,
     //              NULL,
