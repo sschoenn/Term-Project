@@ -29,6 +29,7 @@
 #include "TimeLib.h" //this isn't working
 #include <TimeLib.h>
 #include "TOD.h"
+#include "P13.h"
 
 /// Define Shares & Queues Below
 Share<float> elevation ("ELEV");             // current elevation in milidegrees
@@ -47,6 +48,7 @@ Share<float> accel ("6");            // queue of latest azimuth and elevation po
 // Ephemeris Shares, contain the time data used to track satellite
 Share<uint8_t> starttime_queue ("6");          // contains starting date details: year/month/day/hour/minute/second
 Share<float> elevation_coords("cords");
+Share<float> azimuth_coords("cords");
 
 
 /** @brief   Task which talks to the FXOS8700 accelerometer/magnetometer, and  
@@ -113,6 +115,7 @@ void task_accelmag (void* p_params)
     }
 }
 
+
 /** @brief   Task that interfaces with transmission sensors to implement an
  *           encoder, this task updates the current position read from the encoders
  *  @param   p_params Pointer to parameters passed to this function; we don't
@@ -150,6 +153,14 @@ void task_position (void* p_params)
     pinMode(26, INPUT);         //Setup for elevation ADC pin
     pinMode(27, INPUT);         //Setup for azimuth ADC pin
 
+    //TEMPORARY CODE for calibrating azimuth
+    clear_azimuth << false_var;        //resets azi encoder position
+    clear_elevation << false_var;
+    elev_direction << false_var;
+    azi_direction << true_var;
+    // Motor driver setup for PH/EN Mode
+
+
     // Encoder Position Task Loop
     for (;;)
     {   
@@ -163,17 +174,16 @@ void task_position (void* p_params)
         if (el_clear){
             el_tics = 0;                       //reset elevation encoder position to 0
             elevation >> el_val;
-            el_tics = el_val*80;
+            el_tics = el_val*75.79;
             clear_elevation << false_var;      //resets clear_elevation flag for the next call
         }
         // Runs if the azimuth encoder position must be reset
         if (azi_clear){
             azi_tics = 0;                      //reset azimuth encoder position to 0
             azimuth >> azi_val;
-            azi_tics = azi_val*80;
+            azi_tics = azi_val*197.35;
             clear_azimuth << false_var;        //resets clear_azimuth flag for the next call
         }
-
         // Runs if the elevation encoder reads high and if it has changed states since the last function call
         if ((analogRead(26) > 3500) && el_prev_state==false){
             el_prev_state = true;
@@ -181,28 +191,47 @@ void task_position (void* p_params)
             if (elev_dir){
                 el_tics++;
             }
-            
             // If the motor is spinning in reverse, decrement encoder count
             else if (!elev_dir){  
                 el_tics--;
             }
-
             else{
-                Serial << "Encoder increment issue" << endl;
+                Serial << "Elevation encoder increment issue" << endl;
             }
         }
-
-        // Determine if encoder reads low and if it has not changed posiiton since the last read
+        // Determine if elev encoder reads low and if it has not changed posiiton since the last read
         else if((analogRead(26) < 3000) && (el_prev_state==true)){
             el_prev_state = false;
         }
-        
+        // Runs if the azimuth encoder reads high and if it has changed states since the last function call
+        if ((analogRead(27) > 3500) && azi_prev_state==false){
+            azi_prev_state = true;
+            // If the motor is spinning forward, increment encoder count
+            if (azi_dir){
+                azi_tics++;
+            }
+            // If the motor is spinning in reverse, decrement encoder count
+            else if (!azi_dir){  
+                azi_tics--;
+            }
+            else{
+                Serial << "Azimuth encoder increment issue" << endl;
+            }
+        }
+        // Determine if azi encoder reads low and if it has not changed posiiton since the last read
+        else if((analogRead(27) < 3000) && (azi_prev_state==true)){
+            azi_prev_state = false;
+        }
         // Convert encoder ticks to position (deg)
-        el_deg = (12.5*el_tics);
-        elevation << el_deg;              // Place current position into elevation share
+        el_deg = (13.194*el_tics);       // convert encoder ticks to millidegrees of rotation (12.5 millideg/elev tic)
+        elevation << el_deg;             // Place current position into elevation share
+        azi_deg = (5.067*azi_tics);      // converts encoder ticks to millidegrees of rotation (4.81?)
+        azimuth << azi_deg;              // Place current position into elevation share
         
+        //temp elevation encoder test code
+       
         // Task delay
-        vTaskDelay(1);
+        vTaskDelay(1); //delay of 1
     }
 }
 
@@ -258,7 +287,7 @@ void task_supervisor (void* p_params) //this task is actually the master task
     uint8_t hour_now;
     uint8_t minute_now;
     uint8_t second_now;
-
+    float azi_heading = 150;
     uint8_t wait = 0;
     
     // Place initial values into queues
@@ -270,6 +299,8 @@ void task_supervisor (void* p_params) //this task is actually the master task
     elev_direction << false_var;      // sets initial elevation motor direction
     home_condition << true_var;       // initialize homing sequence first
     first_position << false_var;      // we can't move to 1st sequence position until homing first
+    clear_azimuth << false_var;
+    azi_direction << false_var;
 
     // Motor driver setup for PH/EN Mode
     pinMode(15, OUTPUT); //gpio 15 is the mode set (low for PH/EN high for PWM)
@@ -308,10 +339,12 @@ void task_supervisor (void* p_params) //this task is actually the master task
                 mag >> azimuth_val;
                 elevation << elevation_val;
                 clear_elevation << true_var;
+                azimuth << azi_heading;
+                clear_azimuth << true_var;
                 elevation_coords >> el_sp;
-                Serial << el_sp << endl;
                 elevation_sp << el_sp;
-                Serial << el_sp << endl;
+                azimuth_coords >> azi_sp;
+                azimuth_sp << azi_sp;
                 state = 1;
             }
             
@@ -319,12 +352,14 @@ void task_supervisor (void* p_params) //this task is actually the master task
         
         // 1. WAIT STATE (tracker is aligned at start position, checks current time from internet, compares to initial start time of sequence. move into state 2 when true.)
         else if(state == 1){
-            if(wait < 30){
+            if(wait < 120){
                 wait++;
             }
             else{
-            start << true_var;       // start tracking sequence (activate motor control)
-            state = 2;
+                azi_sp = 1000; //test
+                azimuth_sp << azi_sp;
+                start << true_var;       // start tracking sequence (activate motor control)
+                state = 2;
             }
             }
             // Check and store internet time
@@ -357,8 +392,11 @@ void task_supervisor (void* p_params) //this task is actually the master task
 
         // 2. TRACK STATE (tracker carries out tracking sequence. Sweeps across sky.)
         else if(state == 2){
+            // synchronizes 2 shares
             elevation_coords >> el_sp;
             elevation_sp << el_sp;
+            azimuth_coords >> azi_sp;
+            azimuth_sp << azi_sp;
         }
         else if(state == 3){
             1+1;
@@ -371,9 +409,6 @@ void task_supervisor (void* p_params) //this task is actually the master task
 }
 
 
-
-
-
 /** @brief   Function which generates the tracking sequence heading positions.
  *  @details This function generates the correct heading, producing timing, latitude, 
  *           & longitudinal position coordinates for the particular satellite to be
@@ -382,19 +417,20 @@ void task_supervisor (void* p_params) //this task is actually the master task
 void task_control (void* p_params) 
 {
     // Initialize Variables
-    bool start;              // contains value pulled from share "start"
     float elv_sp = 0;
     float azi_sp = 0;
     float elv;
     float azi;
-    float gain = -50;        //IMPORTANT make sure its negative for stability, adjust this to change control loop
+    float el_gain = -50;        //IMPORTANT make sure its negative for stability, adjust this to change control loop
+    float azi_gain = -50; 
     bool false_var = false;
     bool true_var = true;
-    uint8_t duty_cycle;
+    uint8_t el_duty_cycle;
+    uint8_t azi_duty_cycle;
     int prev_elv = 0;       //some of these vars aren't used...
     int prev_elv_sp = 0;
-    float speed = 0;
-    int old_speed;
+    float el_speed = 0;
+    float azi_speed = 0;
     uint8_t n = 0; //IMPORTANT this keeps track of the timing it's incremented each time the task is entered (ie. every 5ms)
 
     // Motor Control Task Loop
@@ -405,33 +441,55 @@ void task_control (void* p_params)
         elevation >> elv;
         azimuth >> azi;
 
-        speed = gain*(elv_sp - elv)/(1000-n*5); //the times 5 is from the task timing, the 1000 comes from sup task timing
+        // Calculate new speed based on desired and current position data
+        el_speed = el_gain*(elv_sp - elv)/(1000-n*5);   //the times 5 is from the task timing, the 1000 comes from sup task timing
+        azi_speed = azi_gain*(azi_sp - azi)/(1000-n*5); //the times 5 is from the task timing, the 1000 comes from sup task timing
         n++;
         if(n == 200){ // can't divide by zero haha
             n=0;
         }
 
-        //Serial << speed << endl;
-
-        if (speed < 0){
+        // Set direction of rotation of elevation motor
+        if (el_speed < 0){
             digitalWrite(18,0);
             elev_direction << true_var;
         }
-        else if (speed > 0){
+        else if (el_speed > 0){
             digitalWrite(18,1);
             elev_direction << false_var;
         }
         else{
             analogWrite(19,0);
         }
-            
-        if (abs(speed) > 255){
-            duty_cycle = 255;
+        // Set duty cycle of elevation motor
+        if (abs(el_speed) > 255){
+            el_duty_cycle = 255;
         }
         else{
-            duty_cycle = abs(speed);
+            el_duty_cycle = abs(el_speed);
         }
-        analogWrite(19, duty_cycle);    // update motor speed
+        analogWrite(19, el_duty_cycle);    // update motor speed
+
+        // Set direction of rotation of azimuth motor
+        if (azi_speed < 0){
+            digitalWrite(12,0);
+            azi_direction << true_var;
+        }
+        else if (azi_speed > 0){
+            digitalWrite(12,1);
+            azi_direction << false_var;
+        }
+        else{
+            analogWrite(14,0);
+        }
+        // Set duty cycle of azimuth motor
+        if (abs(azi_speed) > 255){
+            azi_duty_cycle = 255;
+        }
+        else{
+            azi_duty_cycle = abs(azi_speed);
+        }
+        analogWrite(14, azi_duty_cycle);    // update motor speed
 
     // Task delay
     vTaskDelay(5);
@@ -509,10 +567,12 @@ void task_coords (void* p_params)
             currenttime += timestep;
         }
 
+        azimuth = azimuth*1000;  //convert to millidegrees
+
         //Serial << "az: " << azimuth << "  " << "el: " << elevation_calc << endl;
         //place tracking data into shares for use with other tasks. If this doesn't change at every iteration maybe we can move this into the "init" part of the task
         elevation_coords << elevation_calc;      //place desired elevation setpoint into share'
-        azimuth_sp << azimuth;               //place desired azimuth setpoint into share
+        azimuth_coords << azimuth;               //place desired azimuth setpoint into share
         
         //place starting time info into queue
         starttime_queue.put(year);
@@ -523,6 +583,78 @@ void task_coords (void* p_params)
         starttime_queue.put(second);
 
         // task delay
+        vTaskDelay(1000);
+    }
+}
+
+
+void task_new_coords (void* p_params)
+{
+    (void)p_params;                     // shuts up compiler warning
+    
+    bool start_flag = false;
+    start << start_flag;
+
+    int year = 2020;
+    uint8_t month = 11;
+    uint8_t day = 29;
+    uint8_t h = 1;
+    uint8_t m = 59;
+    uint8_t s = 0;
+
+    DateTime local_time(year, month, day, h, m, s);
+
+    float LA = 35.6368759;
+    float LO = -120.6545022;
+    float HT = 732; //223m
+
+    Observer local_coords(LA,LO,HT);
+
+    const char * l1 = "1 33591U 09005A   20334.64686490  .00000028  00000-0  40559-4 0  9997"; //NOAA 19 TLE
+    const char * l2 = "2 33591  99.1943 344.2907 0013582 336.4368  23.6179 14.12441211608710";
+
+    Satellite Sat(l1,l2);
+
+    Sat.predict(local_time);
+
+    float alt;
+    float az;
+    float range;
+    float range_rate;
+
+    Sat.topo(&local_coords, alt, az, range, range_rate);
+
+
+
+
+    for (;;){
+
+        start >> start_flag;
+        
+        if (start_flag){
+            s++;
+        }
+        
+
+        if (s == 60){
+            s = 0;
+            m++;
+        }
+        if (m == 60){
+            m = 0;
+            h++;
+        }
+        local_time.settime(year, month, day, h, m, s); //UTC
+        Sat.predict(local_time);
+        Sat.topo(&local_coords, alt, az, range, range_rate);
+
+        az *= 1000;
+        alt *= 1000;
+
+        elevation_coords << alt;
+        azimuth_coords << az;
+
+        //Serial << "azimuth " << az << " altitude " << alt << endl;
         vTaskDelay(1000);
     }
 }
@@ -602,32 +734,31 @@ void setup ()
                  NULL,                            // Parameter(s) for task fn.
                  4,                               // Priority
                  NULL);                           // Task handle
-    //Create a task which prints accelerometer data in a pretty way
     xTaskCreate (task_supervisor,
                  "Printy",                        // Name for printouts
-                 4000,                             // Stack size
+                 4000,                            // Stack size
                  NULL,                            // Parameter(s) for task fn.
-                 20,                               // Priority
+                 20,                              // Priority
                  NULL);                           // Task handle 
     xTaskCreate (task_position,
-                 "position",                        // Name for printouts
-                 2000,                             // Stack size
+                 "position",                      // Name for printouts
+                 2000,                            // Stack size
                  NULL,                            // Parameter(s) for task fn.
                  5,                               // Priority
                  NULL);                           // Task handle
     xTaskCreate (task_control,
-                 "control",                        // Name for printouts
-                 2000,                             // Stack size
+                 "control",                       // Name for printouts
+                 2000,                            // Stack size
                  NULL,                            // Parameter(s) for task fn.
                  6,                               // Priority
                  NULL);                           // Task handle
-    xTaskCreate (task_coords,
-                 "coordinates",                   // Name for printouts
-                 15000,                           // Stack size
-                 NULL,                            // Parameter(s) for task fn.
-                 12,                               // Priority
+    xTaskCreate (task_new_coords,
+                 "coordinates",                  // Name for printouts
+                 15000,                          // Stack size
+                 NULL,                           // Parameter(s) for task fn.
+                 12,                             // Priority
                  NULL);        
-    // xTaskCreate (task_time,                       // keeps track of internet time
+    // xTaskCreate (task_time,                      // keeps track of internet time
     //              "timey",
     //              4000,
     //              NULL,
