@@ -1,24 +1,19 @@
 /** @file main.cpp
  *    This file contains things that need to be documented
  * 
- *    This example uses the Adafruit FXOS8700 library at 
- *    @c https://github.com/adafruit/Adafruit_FXOS8700.git
- *    to communicate with an accelerometer on a custom shoe PCB made for the
- *    DOIT ESP32 DEVKIT V1. 
+ *    
  * 
- *  @author  Simon Schoennauer
+ *  @author  Simon Schoennauer, Deven Frauenhofer, Lynette Cox
  *  @date    4 Nov 2020 Original file
- *  @date    21 Nov 2020
- *  This version of our main file has implemented the control loop, encoder reading, and FXO8700 driver
- *  tasks. Only the elevation axis is supported. 
+ *  @date    1 Dec 2020 Final file
  */
-
+ 
 #include <Arduino.h>
 #include <PrintStream.h>
 #if (defined STM32L4xx || defined STM32F4xx)
     #include <STM32FreeRTOS.h>
 #endif
-
+ 
 #include <Wire.h>
 #include "Adafruit_FXOS8700.h"
 #include <math.h>
@@ -26,11 +21,9 @@
 #include "taskshare.h"
 #include <analogWrite.h>
 #include <cmath>
-#include "TimeLib.h" //this isn't working
-#include <TimeLib.h>
 #include "TOD.h"
 #include "P13.h"
-
+ 
 /// Define Shares & Queues Below
 Share<float> elevation ("ELEV");             // current elevation in milidegrees
 Share<float> azimuth ("AZI");                // current azimuth in milidegrees
@@ -40,21 +33,35 @@ Share<bool> elev_direction("ELEV DIR");      // either a 1 or 0 to represent dir
 Share<bool> azi_direction("AZI DIR");        // either a 1 or 0 to represent direction of the elev motor
 Share<float> elevation_sp("SP ELEV");        // elevation setpoint in milidegrees
 Share<float> azimuth_sp("SP AZI");           // azimuth setpoint in milidegrees
-Share<bool> start("start");        // true if we're ready to begin the tracking sequence
-Share<bool> home_condition("homing");        // true if the device is homing itself to first position
-Share<bool> first_position("1st POSITION");  // true if we're trying to move to the first position of the sequence (part of the home state)
-Share<float> mag("6");
-Share<float> accel ("6");            // queue of latest azimuth and elevation position data based on accel/mag readings
+Share<float> mag("MAG");                     // queue of latest magnetometer data
+Share<float> accel ("ACCEL");                // queue of latest accelerometer data
+Share<bool> start("start");                  // true if we're ready to begin the tracking sequence
 // Ephemeris Shares, contain the time data used to track satellite
-Share<uint8_t> starttime_queue ("6");          // contains starting date details: year/month/day/hour/minute/second
-Share<float> elevation_coords("cords");
-Share<float> azimuth_coords("cords");
-
-
+Queue<uint8_t> starttime_queue(6);           // contains starting date details: year/month/day/hour/minute/second
+Queue <uint8_t> currenttime_queue(48);       // contains the current year/month/day/hour/minute/second
+Share<float> elevation_coords("ELEV_CORDS"); // contains the next desired elevation position
+Share<float> azimuth_coords("AZI_CORDS");    // contains the next desired azimuth position
+ 
+ 
 /** @brief   Task which talks to the FXOS8700 accelerometer/magnetometer, and  
- *           outputs inclination angle to the serial monitor once per second.
+ *           outputs inclination angle and magnetic heading.
+ *  @details This task reads raw 3-axis data from both the accelerometer
+ *           and magnetometer. The magnetometer data is calibrated before it is
+ *           converted into a magnetic heading. The accelerometer data is directly
+ *           converted into a tilt angle. The magnetic heading (azimuth angle) 
+ *           and elevation angle are placed into shared data variables.
+ *           This task uses the Adafruit FXOS8700 library at 
+ *           @c https://github.com/adafruit/Adafruit_FXOS8700.git
  *  @param   p_params Pointer to parameters passed to this function; we don't
  *           expect to be passed anything and so ignore this pointer
+ *  @param   ax variable that contains the raw X-axis accelerometer reading
+ *  @param   ay variable that contains the raw Y-axis accelerometer reading
+ *  @param   az variable that contains the raw Z-axis accelerometer reading
+ *  @param   mx variable that contains the raw X-axis magnetometer reading
+ *  @param   my variable that contains the raw Y-axis magnetometer reading
+ *  @param   mz variable that contains the raw Z-axis magnetometer reading
+ *  @param   azi variable that contains the current azimuth heading, in deg.
+ *  @param   el variable that contains the current elevation angle, in deg.
  */
 void task_accelmag (void* p_params)
 {
@@ -66,13 +73,13 @@ void task_accelmag (void* p_params)
     double mx;        // magnetic orientation in x, y, z
     double my;
     double mz;
-    float azi = 0;
-    float el = 0;
-
+    float azi = 0;    // magnetic heading CW in degrees from north (N = 0 deg)
+    float el = 0;     // current elevation angle, in deg from horizontal
+ 
     // Initialize the I2C bus and accelerometer driver
     Wire.begin ();
     Adafruit_FXOS8700 accelmag = Adafruit_FXOS8700(0x8700A, 0x8700B);      // Create instance of the FXOS class
-
+ 
     // Initialize the sensor 
     if (!accelmag.begin(ACCEL_RANGE_4G)) {
         /* There was a problem detecting the FXOS8700 ... check your connections */
@@ -84,9 +91,10 @@ void task_accelmag (void* p_params)
     // If the accel/mag works, ask it for accel and mag data
     for (;;)
     {
+        // Create event variable
         sensors_event_t aevent, mevent;
-
-        // Get a new sensor event, store ordered results in queue
+ 
+        // Get a new sensor event, store ordered results in shares
         accelmag.getEvent(&aevent, &mevent);
         ax = aevent.acceleration.x;
         ay = aevent.acceleration.y;
@@ -94,11 +102,12 @@ void task_accelmag (void* p_params)
         mx = mevent.magnetic.x;
         my = mevent.magnetic.y;
         mz = mevent.magnetic.z;
-
-        // Calibrate Magnetometer
-        mx = mx + 53.5;
-        my = my + 74.25;
-        mz = mz - 74.25;
+ 
+        // Calibrate magnetometer results
+	// The calibration was done by pointing each axis roughly in the direction of the magnetic field, so that the sensor reading                       for that axis was at a minimum/maximum, and recording the reading. Then, the PCB was flipped 180 degrees and the reading was taken again. The average of these two readings for each axis represents the error/bias of the sensor. This error is subtracted from the magnetometer readings in the code.
+        mx = mx + 57.5;    
+        my = my + 66.75;
+        mz = mz - 51;
         
         // Calculate magnetic heading
         el = atan2(-az,ay);
@@ -107,64 +116,65 @@ void task_accelmag (void* p_params)
         // Convert to deg
         el = el*57.295;
         azi = azi*57.295;
-
-        accel.put(el);     // put current elevation into queue
-        mag.put(azi);    // put current azimuth into queue
-
+ 
+        accel.put(el);     // put current elevation into share
+        mag.put(azi);      // put current azimuth into share
+ 
         delay(30);
     }
 }
-
-
-/** @brief   Task that interfaces with transmission sensors to implement an
+ 
+ 
+/** @brief   Task that interfaces with optical transmission sensors to implement an
  *           encoder, this task updates the current position read from the encoders
+ *  @details This task counts ticks for both the elevation and azimuth motor encoders.
+ *           This task resets encoder count if it is flagged to do so. This task also 
+ *           converts total encoder count into angular position data for the elevation
+ *           and azimuth axes using a calibration constant defined by the gear 
+ *           reductions in the mechanical system.
  *  @param   p_params Pointer to parameters passed to this function; we don't
  *           expect to be passed anything and so ignore this pointer
  *  @param   elevation This is a share that is updated to contain the current elevation 
  *           pointing position, in millidegrees, as read from the encoders. 
+ *  @param   azimuth This is a share that is updated to contain the current azimuth 
+ *           magnetic heading, in millidegrees, as read from the encoders. 
  *  @param   clear_elevation A bool, if set true, the task sets @param elevation to zero and sets 
  *           @param clear_elevation to false
- *  @param   elev_dir This contains the elevation motor direction so the encoder can 
- *           determine when to increment or decrement the total encoder count
+ *  @param   clear_azimuth A bool, if set true, the task sets @param azimuth to zero and sets 
+ *           @param clear_azimuth to false
+ *  @param   elev_direction This contains the elevation motor direction so the
+ *           encoder can determine when to increment or decrement the total encoder count
+ *  @param   azi_direction This contains the azimuth motor direction so the  
+ *           encoder can determine when to increment or decrement the total encoder count
  */
 void task_position (void* p_params)
 {
     (void)p_params;             // does nothing, clears a compiler warning
-    
     // Initialize Variables
     bool el_prev_state = false;
     bool azi_prev_state = false;
-    bool el_clear = false;
-    bool azi_clear = false;
     int azi_tics = 0;
     int el_tics = 0;
-    int int_dummy = 0;
-    bool elev_dir;              //direction of elevation motor
-    bool azi_dir;               //direction of azimuth motor
+    // Variables to hold values pulled from shares
+    bool el_clear = false;
+    bool azi_clear = false;
+    bool elev_dir;              
+    bool azi_dir;              
     float el_deg;
     float azi_deg;
     float el_val;
     float azi_val;
     // Redundant variables needed to update shares
     bool false_var = false;     
-    bool true_var = true;
-    int zero = 0;
-
+ 
+    // Set up ADC pins for encoders
     pinMode(26, INPUT);         //Setup for elevation ADC pin
     pinMode(27, INPUT);         //Setup for azimuth ADC pin
-
-    //TEMPORARY CODE for calibrating azimuth
-    clear_azimuth << false_var;        //resets azi encoder position
-    clear_elevation << false_var;
-    elev_direction << false_var;
-    azi_direction << true_var;
-    // Motor driver setup for PH/EN Mode
-
-
+ 
     // Encoder Position Task Loop
     for (;;)
     {   
-        // Serial << analogRead(26) << " previous state " << el_prev_state << endl;      //debug code
+        // Grab values from shares
         clear_elevation >> el_clear;           //grab clear_elevation bool
         clear_azimuth >> azi_clear;            //grab clear_azimuth bool
         elev_direction >> elev_dir;            //grab current elevation motor direction
@@ -227,15 +237,13 @@ void task_position (void* p_params)
         elevation << el_deg;             // Place current position into elevation share
         azi_deg = (5.067*azi_tics);      // converts encoder ticks to millidegrees of rotation (4.81?)
         azimuth << azi_deg;              // Place current position into elevation share
-        
-        //temp elevation encoder test code
-       
+               
         // Task delay
         vTaskDelay(1); //delay of 1
     }
 }
-
-
+ 
+ 
 /** @brief   Task which handles the 3 main states of the satellite tracker 
  *           positioning system.
  *  @details This task handles the following 3 states:
@@ -253,37 +261,33 @@ void task_position (void* p_params)
  *                         a tracking sequence. The tracker will sweep across the sky using
  *                         coordinates it receives 
  *  @param   p_params Pointer to parameters passed to this function; we don't
- *           expect to be passed anything and so ignore this pointer
+ *           expect to be passed anything and so ignore this pointer.
  */
 void task_supervisor (void* p_params) //this task is actually the master task
 {
     (void)p_params;                   //shuts up compiler warning
-
     /// Initialize Variables
     uint8_t state = 0;                //contains current state of supervisor task, begin in HOME state
-    //these variables hold start time data from the starttime_queue
-    uint8_t day;
-    uint8_t month;
-    uint8_t year;
-    uint8_t hour;
-    uint8_t minute;
-    uint8_t second;  
     // Redundant variables that have to exist in order to place stuff into shares
     bool false_var = false;
     bool true_var = true;
-    int zero = 0;
     float float_zero;
     // These are local variables that hold values pulled from shares
     float el_sp; 
     float azi_sp;
     float elevation_val = 0;
     float azimuth_val = 0;
-    bool home_bool;
-    bool first_position_var;          // holds bool from share first_position
+    // Variables holding start time data from the starttime_queue
+    uint8_t day;
+    uint8_t month;
+    uint8_t year;
+    uint8_t hour;
+    uint8_t minute;
+    uint8_t second;
     // Variables for recording current time
-    uint8_t year_now;
-    uint8_t month_now;
     uint8_t day_now;
+    uint8_t month_now;
+    uint8_t year_now;
     uint8_t hour_now;
     uint8_t minute_now;
     uint8_t second_now;
@@ -297,11 +301,9 @@ void task_supervisor (void* p_params) //this task is actually the master task
     azimuth << float_zero;            // sets initial azimuth   position to 0   
     clear_elevation << false_var;     // does not reset elevation count
     elev_direction << false_var;      // sets initial elevation motor direction
-    home_condition << true_var;       // initialize homing sequence first
-    first_position << false_var;      // we can't move to 1st sequence position until homing first
     clear_azimuth << false_var;
     azi_direction << false_var;
-
+ 
     // Motor driver setup for PH/EN Mode
     pinMode(15, OUTPUT); //gpio 15 is the mode set (low for PH/EN high for PWM)
     digitalWrite(15,0);
@@ -313,20 +315,17 @@ void task_supervisor (void* p_params) //this task is actually the master task
     digitalWrite(18,1);
     pinMode(19, OUTPUT); //gpio 19 is the EN for motor A (Elevation)
     analogWrite(19, 100);
-
+ 
     // Supervisor task loop
     for (;;){
-
         // Grab values from shares
         elevation >> elevation_val;   // grab current elevation from share 'elevation', place in 'elevation_val'
         elevation_sp >> el_sp;        // grab elevation setpoint from share 'elevation_sp', place in 'el_sp'
         azimuth >> azimuth_val;       // grab current azumuth from share 'azimuth', place in 'azimuth_var'
         azimuth_sp >> azi_sp;         // grab azimuth setpoint from share 'azimuth_sp', place in 'azi_sp'
-        home_condition >> home_bool;  // grab bool from share 'home_condition' and place into home_bool
-        first_position >> first_position_var; // grab bool from share 'first_position', place into first_position_var
-
+ 
         Serial << "State " << state << " | Current Elev: " << elevation_val << " | Elev sp: " << el_sp << " | Current Azi: " << azimuth_val << " | Azi sp: " << azi_sp << endl;
-
+ 
         /// 0-2: SUPERVISOR TASK STATE MACHINE
         // 0. HOME STATE (run at initial power-up; read magnetometer and move to start location of next sattrack sequence. then move to state 1)
         if(state == 0){
@@ -348,91 +347,101 @@ void task_supervisor (void* p_params) //this task is actually the master task
                 state = 1;
             }
             
-        } //end of state 0
+        } // end of state 0
         
         // 1. WAIT STATE (tracker is aligned at start position, checks current time from internet, compares to initial start time of sequence. move into state 2 when true.)
         else if(state == 1){
-            if(wait < 120){
-                wait++;
-            }
-            else{
-                azi_sp = 1000; //test
-                azimuth_sp << azi_sp;
-                start << true_var;       // start tracking sequence (activate motor control)
-                state = 2;
-            }
-            }
-            // Check and store internet time
-
-            // pull desired sequence start time from queue
-            // starttime_queue.get(year);
-            // starttime_queue.get(month);
-            // starttime_queue.get(day);
-            // starttime_queue.get(hour);
-            // starttime_queue.get(minute);
-            // starttime_queue.get(second);
-
-            // Check if we're ready to begin the sequence by comparing current time to desired start time
-            // if( (day(time) == day) && (month(time) == month) && (year(time) == year) ) {                //first verify the correct date
-            //     if( (hour(time) == hour) && (minute(time) == minute) && (second(time) >= second) ) {    //next verify the correct time, seconds are triggered if time is >= desired ???
-            //         state = 2;    // start time reached, move into tracking state
-            //         Serial << "Date(Month/Day/Year): " << month(time) << "/" << day(time) << "/" << year(time) << "|  Time(hr/min/sec): " << hour(time) << "/" << minute(time) << "/" << second(time) <<  endl;
-            //         Serial << "Tracking State Begin. " << endl;
-            //     }
-            //     else{
-            //         // do nothing, we aren't ready to change state yet (not right time)
-            //     }
+            // Old code for testing (bypasses internet time start flag)
+            // if(wait < 120){
+            //     wait++;
             // }
             // else{
-            //     // do nothing, we aren't ready to change state yet (not right date)
-            //     Serial << "Month/day/year does not match desired start month/day/year" << endl;
+            //     azi_sp = 1000; //test
+            //     azimuth_sp << azi_sp;
+            //     start << true_var;       // start tracking sequence (activate motor control)
+            //     state = 2;
             // }
-
-         //end of state 1
-
+            // } // end of state 1
+ 
+            // Pull desired sequence start time & current time from queues
+            starttime_queue.get(year);
+            starttime_queue.get(month);
+            starttime_queue.get(day);
+            starttime_queue.get(hour);
+            starttime_queue.get(minute);
+            starttime_queue.get(second);
+            currenttime_queue.get(year_now);
+            currenttime_queue.get(month_now);
+            currenttime_queue.get(day_now);
+            currenttime_queue.get(hour_now);
+            currenttime_queue.get(minute_now);
+            currenttime_queue.get(second_now);
+ 
+            // Check if we're ready to begin the sequence by comparing current time to desired start time
+            if( (day_now == day) && (month_now == month) && (year_now == year) ) {                //first verify the correct date
+                if( (hour_now == hour) && (minute_now == minute) && (second_now >= second) ) {    //next verify the correct time, seconds are triggered if time is >= desired ???
+                    start << true_var;                                                            // begin tracking
+                    state = 2;                                                                    // start time reached, move into tracking state
+                    Serial << "Date(Month/Day/Year): " << month_now << "/" << day_now << "/" << year_now << "|  Time(hr/min/sec): " << hour_now << "/" << minute_now << "/" << second_now <<  endl;
+                    Serial << "Tracking State Begin. " << endl;
+                }
+                else{
+                    // do nothing, we aren't ready to change state yet (not time yet)
+                }
+            }
+            else{
+                // do nothing, we aren't ready to change state yet (not right date)
+                Serial << "Month/day/year does not match desired start month/day/year" << endl;
+            }
+ 
+        } // end of state 1
+ 
         // 2. TRACK STATE (tracker carries out tracking sequence. Sweeps across sky.)
         else if(state == 2){
-            // synchronizes 2 shares
-            elevation_coords >> el_sp;
+            // synchronizes 2 sets of shares
+            elevation_coords >> el_sp;    // sets elevation_sp = elevation_coords
             elevation_sp << el_sp;
-            azimuth_coords >> azi_sp;
+            azimuth_coords >> azi_sp;     // sets azimuth_sp = azimuth_coords
             azimuth_sp << azi_sp;
         }
-        else if(state == 3){
-            1+1;
-        }
-
+        else {
+            Serial << "Supervisor task state error" << endl;
+        } // end of state 2
+ 
         // Supervisor task time delay 
         vTaskDelay(1000);
-        
     }
-}
-
-
-/** @brief   Function which generates the tracking sequence heading positions.
- *  @details This function generates the correct heading, producing timing, latitude, 
- *           & longitudinal position coordinates for the particular satellite to be
- *           tracked.
+} // end supervisor task
+ 
+ 
+/** @brief   Function which controls the azimuth and elevation motors using
+ *           closed-loop speed control.
+ *  @details This function calculates and updates both the elevation 
+ *           and azimuth motor speeds based on current and desired 
+ *           position information. 
+ *  @param   p_params Pointer to parameters passed to this function; we don't
+ *           expect to be passed anything and so ignore this pointer.
  */
 void task_control (void* p_params) 
 {
+    (void)p_params;                   //shuts up compiler warning
     // Initialize Variables
+    uint8_t n = 0; //IMPORTANT this keeps track of the timing it's incremented each time the task is entered (ie. every 5ms)
+    float el_gain = -50;    // IMPORTANT make sure negative for stability, adjust this to change el control loop
+    float azi_gain = -50;   // adjust this to change azi control loop
+    uint8_t el_duty_cycle;
+    uint8_t azi_duty_cycle;
+    float el_speed = 0;
+    float azi_speed = 0;
+    // Variables that hold data from shares
     float elv_sp = 0;
     float azi_sp = 0;
     float elv;
     float azi;
-    float el_gain = -50;        //IMPORTANT make sure its negative for stability, adjust this to change control loop
-    float azi_gain = -50; 
+    // Redundant varables needed to update shares
     bool false_var = false;
     bool true_var = true;
-    uint8_t el_duty_cycle;
-    uint8_t azi_duty_cycle;
-    int prev_elv = 0;       //some of these vars aren't used...
-    int prev_elv_sp = 0;
-    float el_speed = 0;
-    float azi_speed = 0;
-    uint8_t n = 0; //IMPORTANT this keeps track of the timing it's incremented each time the task is entered (ie. every 5ms)
-
+ 
     // Motor Control Task Loop
     for (;;){
         //pull data from shares
@@ -440,7 +449,7 @@ void task_control (void* p_params)
         azimuth_sp >> azi_sp;
         elevation >> elv;
         azimuth >> azi;
-
+ 
         // Calculate new speed based on desired and current position data
         el_speed = el_gain*(elv_sp - elv)/(1000-n*5);   //the times 5 is from the task timing, the 1000 comes from sup task timing
         azi_speed = azi_gain*(azi_sp - azi)/(1000-n*5); //the times 5 is from the task timing, the 1000 comes from sup task timing
@@ -448,7 +457,7 @@ void task_control (void* p_params)
         if(n == 200){ // can't divide by zero haha
             n=0;
         }
-
+ 
         // Set direction of rotation of elevation motor
         if (el_speed < 0){
             digitalWrite(18,0);
@@ -469,7 +478,7 @@ void task_control (void* p_params)
             el_duty_cycle = abs(el_speed);
         }
         analogWrite(19, el_duty_cycle);    // update motor speed
-
+ 
         // Set direction of rotation of azimuth motor
         if (azi_speed < 0){
             digitalWrite(12,0);
@@ -490,289 +499,188 @@ void task_control (void* p_params)
             azi_duty_cycle = abs(azi_speed);
         }
         analogWrite(14, azi_duty_cycle);    // update motor speed
-
+ 
     // Task delay
     vTaskDelay(5);
     }
 }
-
-
-/** @brief   Function which generates the tracking sequence heading positions.
- *  @details This function generates the correct heading, producing timing, latitude, 
- *           & longitudinal position coordinates for the particular satellite to be
- *           tracked.
- *           Inputs are GPS cords of sat tracker, GPS coods of the sat at some point
- *           at the current time (init conditions of longitude, latitude, and time),
- *           and velocty of sat (constant).
- */
-void task_coords (void* p_params)
-{
-    (void)p_params;                     // shuts up compiler warning
-
-    float lates = 35.49;                // 
-    float lones = -120.67;              // 
-    float latsat;                       // 
-    float lonsat = 55.3;                // 
-    float latsat0 = 44.41;              //
-    long starttime = 69260;             // 
-    long endtime = 69320;               //
-    float vsat = 7.42;                  // 
-    float earthradius = 6370;           // [km] radius of the earth
-    float altitude = 863.25;            // [km?] altitude of SatTrack
-    float gamma;                        //
-    float el;                           //
-    float alpha;                        //
-    float pi = 3.141592653589793;       // contains value of pi
-    float timestep = 1;                 // [s?] value of time step
-    float elevation_calc = 0;               // contains final calc of desired elevation
-    float azimuth;                      // contains the desired azimuth position
-    int currenttime=1;                    // contains current time
-    bool start_flag = false;                         // true if we are ready to start tracking
-
-    // Initialize date variables to be placed inside shares
-    uint8_t day = 23;                   // contains the day of the month (0-31) 
-    uint8_t month = 11;                 // contains the month (1-12) 
-    uint8_t year = 2020;                // contains the 4-digit year (2020, 2008, etc) 
-    uint8_t hour = 15;                  // contains hour, military time (0-23)
-    uint8_t minute = 30;                // contains minutes (0-59)
-    uint8_t second = 30;                // contains seconds (0-59)
-    start << start_flag;
-    // Task Loop
-    for (;;){
-        latsat = latsat0 + vsat/(earthradius + altitude)*currenttime;
-        gamma = acos(sin(latsat)*sin(lates)+cos(latsat)*cos(lates)*cos(lonsat-lones));
-        el = acos(sin(gamma)/sqrt(1+pow(earthradius/(earthradius+altitude),2)-2*(earthradius/(earthradius+altitude))*cos(gamma)));
-        elevation_calc = 1000*el*180/pi;
-        alpha = asin(sin(abs(lones-lonsat))*cos(latsat)/sin(gamma));
-        if(latsat<=lates && lonsat<=lones)
-        {
-            azimuth = 180 + alpha*180/pi;
-        }
-        if(latsat<=lates && lonsat>lones)
-        {
-            azimuth = 180 - alpha*180/pi;
-        }
-        if(latsat>lates && lonsat<=lones)
-        {
-            azimuth = 360 - alpha*180/pi;
-        }
-        if(latsat>lates && lonsat>lones)
-        {
-            azimuth = alpha*180/pi;
-        }
-
-        start >> start_flag;
-        
-        if (start_flag){
-            currenttime += timestep;
-        }
-
-        azimuth = azimuth*1000;  //convert to millidegrees
-
-        //Serial << "az: " << azimuth << "  " << "el: " << elevation_calc << endl;
-        //place tracking data into shares for use with other tasks. If this doesn't change at every iteration maybe we can move this into the "init" part of the task
-        elevation_coords << elevation_calc;      //place desired elevation setpoint into share'
-        azimuth_coords << azimuth;               //place desired azimuth setpoint into share
-        
-        //place starting time info into queue
-        starttime_queue.put(year);
-        starttime_queue.put(month);
-        starttime_queue.put(day);
-        starttime_queue.put(hour);
-        starttime_queue.put(minute);
-        starttime_queue.put(second);
-
-        // task delay
-        vTaskDelay(1000);
-    }
-}
-
-
+ 
+ 
 void task_new_coords (void* p_params)
 {
     (void)p_params;                     // shuts up compiler warning
     
     bool start_flag = false;
     start << start_flag;
-
+ 
     int year = 2020;
     uint8_t month = 11;
     uint8_t day = 29;
     uint8_t h = 1;
     uint8_t m = 59;
     uint8_t s = 0;
-
-    DateTime local_time(year, month, day, h, m, s);
-
-    float LA = 35.6368759;
+ 
+    DateTime local_time(year, month, day, h, m, s);	//Creates a date time object
+ 
+    float LA = 35.6368759;	//Paso Robles Coordinates
     float LO = -120.6545022;
-    float HT = 732; //223m
-
-    Observer local_coords(LA,LO,HT);
-
+    float HT = 732; //223m	//Feet or meters?
+ 
+    Observer local_coords(LA,LO,HT); //Create observer object
+ 
     const char * l1 = "1 33591U 09005A   20334.64686490  .00000028  00000-0  40559-4 0  9997"; //NOAA 19 TLE
     const char * l2 = "2 33591  99.1943 344.2907 0013582 336.4368  23.6179 14.12441211608710";
-
-    Satellite Sat(l1,l2);
-
-    Sat.predict(local_time);
-
+ 
+    Satellite Sat(l1,l2);	//Create Satellite object with NOAA19 TLE
+ 
+    Sat.predict(local_time);	//Compute Satellite Coordinate Predictions 
+ 
     float alt;
     float az;
     float range;
     float range_rate;
-
-    Sat.topo(&local_coords, alt, az, range, range_rate);
-
-
-
-
+ 
+    Sat.topo(&local_coords, alt, az, range, range_rate);	//Generate look angles using observer object
+ 
     for (;;){
-
-        start >> start_flag;
+ 
+        start >> start_flag;	//Update start flag share
         
-        if (start_flag){
+        if (start_flag){	//Keep track of time using task timing
             s++;
         }
-        
-
+ 
         if (s == 60){
             s = 0;
             m++;
         }
-        if (m == 60){
+        if (m == 60){		//No need to go over an hour
             m = 0;
             h++;
         }
-        local_time.settime(year, month, day, h, m, s); //UTC
-        Sat.predict(local_time);
-        Sat.topo(&local_coords, alt, az, range, range_rate);
-
-        az *= 1000;
+        local_time.settime(year, month, day, h, m, s); //UTC update the time
+        Sat.predict(local_time); //Compute satellite coordinates
+        Sat.topo(&local_coords, alt, az, range, range_rate); //Compute look angles relative to observer
+ 
+        az *= 1000;	//We use milidegrees
         alt *= 1000;
-
-        elevation_coords << alt;
+ 
+        elevation_coords << alt; //Stow in the share
         azimuth_coords << az;
-
+ 
         //Serial << "azimuth " << az << " altitude " << alt << endl;
         vTaskDelay(1000);
     }
 }
-
-
-/** @brief   Task which receives data from a queue and prints it nicely.
+ 
+ 
+/** @brief   Task which returns current UTC time from the internet.
+ *  @details This task takes in your network SSID and password, establishes
+ *           a connection with the internet, and then pulls UTC time. It stores
+ *           current time data into a queue.
  *  @param   p_params Pointer to parameters passed to this function; we don't
  *           expect to be passed anything and so ignore this pointer
+ *  @param   currenttime_queue This queue holds current time data in the form of
+ *           year/month/day/hour/minute/second.
  */
 void task_time (void* p_params)
 {
     // Initialize Variables
-    uint8_t year = 2020;
+    // manually enter current day/month/year
+    uint8_t year = 20;    //only input last 2 digits (e.g. 20 = 2020)
     uint8_t month = 11;
     uint8_t day = 28;
     
     TOD RTC; //Instantiate Time of Day class TOD as RTC
-
+ 
     uint8_t lastminute=0;
     uint8_t lastsecond=0;
     char printbuffer[50];
     bool TODvalid=false;
-
-    char ssid[] = "Clarks";                 // your network SSID (name)
-    char password[] = "numberonecat";       // your network password
+ 
+    char ssid[] = "netID";                 // your network SSID (name)
+    char password[] = "password";          // your network password
     
     //Internet access setup
     if(RTC.begin(ssid,password))TODvalid=true;   //.begin(ssid,password) requires SSID and password of your home access point
                                                //All the action is in this one function.  It connects to access point, sends
                                                //an NTP time query, and receives the time mark. Returns TRUE on success.
     lastminute=RTC.minute();
-
-    // TASK LOOP!
+ 
+    // Time task loop
     for (;;){
         // TIME STUFF (TOD library)
         if(RTC.second()!=lastsecond && TODvalid){ //We want to perform this loop on the second, each second
             lastsecond=RTC.second();
-            starttime_queue.put(year);
-            starttime_queue.put(month);
-            starttime_queue.put(day);
-            // starttime_queue.put(RTC.hour());
-            // starttime_queue.put(RTC.minute());
-            // starttime_queue.put(RTC.second());
-            sprintf(printbuffer,"   UTC Time:%02i:%02i:%02i.%03i\n", RTC.hour(), RTC.minute(),RTC.second(),RTC.millisec());  //debug code
-            Serial<<printbuffer;                                                                                             //debug code
+            currenttime_queue.put(year);
+            currenttime_queue.put(month);
+            currenttime_queue.put(day);
+            currenttime_queue.put(RTC.hour());
+            currenttime_queue.put(RTC.minute());
+            currenttime_queue.put(RTC.second());
         }
-        // Test code, delete this "if" later
-        // if(RTC.minute()==lastminute+2 && TODvalid){ //Every 3 minutes, hit the NIST time server again (just to demonstrate)
-        //     lastminute=RTC.minute();
-        //     RTC.begin(ssid,password);
-        // }
-        vTaskDelay(1000);  //1 second delay, needed for time timing.
+        vTaskDelay(1000);  //1 second delay, needed for proper task timing.
     }
 }
-
-
+ 
+ 
 /** @brief   Arduino setup function which runs once at program startup.
  *  @details This function sets up a serial port for communication and creates 
  *           the tasks which will be run.
  */
 void setup () 
 {
-    // Start the serial port, wait a short time, then say hello. Use the
-    // non-RTOS delay() function because the RTOS hasn't been started yet.
-    // The "\033[2J" causes some serial terminals to clear their screens
+    // Start the serial port, wait a short time, then say hello. 
     Serial.begin (115200);
     delay (2000);
-    Serial << endl << endl << "Begin SatTrack main.cpp" << endl;
-
-    // Specify which pin is to be used to send the PWM and make a pointer to it
-    // The variable must be static so it exists when the task function runs
-
+    Serial << endl << endl << "Begin SatTrack" << endl;
+  
     // Create a task which reads accel/magnetometer data
     xTaskCreate (task_accelmag,
                  "AccelMag",                      // Name for printouts
                  2000,                            // Stack size
                  NULL,                            // Parameter(s) for task fn.
-                 4,                               // Priority
+                 3,                               // Priority
                  NULL);                           // Task handle
     xTaskCreate (task_supervisor,
                  "Printy",                        // Name for printouts
                  4000,                            // Stack size
                  NULL,                            // Parameter(s) for task fn.
-                 20,                              // Priority
+                 2,                              // Priority
                  NULL);                           // Task handle 
     xTaskCreate (task_position,
                  "position",                      // Name for printouts
                  2000,                            // Stack size
                  NULL,                            // Parameter(s) for task fn.
-                 5,                               // Priority
+                 1,                               // Priority
                  NULL);                           // Task handle
     xTaskCreate (task_control,
                  "control",                       // Name for printouts
                  2000,                            // Stack size
                  NULL,                            // Parameter(s) for task fn.
-                 6,                               // Priority
+                 1,                               // Priority
                  NULL);                           // Task handle
     xTaskCreate (task_new_coords,
                  "coordinates",                  // Name for printouts
                  15000,                          // Stack size
                  NULL,                           // Parameter(s) for task fn.
-                 12,                             // Priority
+                 3,                             // Priority
                  NULL);        
-    // xTaskCreate (task_time,                      // keeps track of internet time
-    //              "timey",
-    //              4000,
-    //              NULL,
-    //              6,
-    //              NULL);
-
+    xTaskCreate (task_time,                      // keeps track of internet time
+                 "timey",
+                  4000,
+                 NULL,
+                 4,
+                 NULL);
+ 
     // If using an STM32, we need to call the scheduler startup function now;
     // if using an ESP32, it has already been called for us
     #if (defined STM32L4xx || defined STM32F4xx)
         vTaskStartScheduler ();
     #endif
 }
-
-
+ 
+ 
 /** @brief   Arduino's low-priority loop function, which we don't use.
  *  @details A non-RTOS Arduino program runs all of its continuously running
  *           code in this function after @c setup() has finished. When using
@@ -781,4 +689,6 @@ void setup ()
  */
 void loop () {
 }
+ 
+ 
 
